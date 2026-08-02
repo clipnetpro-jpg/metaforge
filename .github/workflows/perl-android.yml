@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: out/${{ matrix.abi }}
-          key: perl-${{ matrix.abi }}-${{ env.PERL_VERSION }}-${{ env.PERL_CROSS_VERSION }}-v3
+          key: perl-${{ matrix.abi }}-${{ env.PERL_VERSION }}-${{ env.PERL_CROSS_VERSION }}-v4
 
       - name: Fetch sources
         if: steps.cache.outputs.cache-hit != 'true'
@@ -85,6 +85,7 @@ jobs:
               -Dusedl=undef \
               -Duseshrplib=false \
               -Dcc="$CC" \
+              --disable-mod=re,IPC/SysV,GDBM_File,NDBM_File,ODBM_File,DB_File \
               $EXTRA 2>&1 | tee configure.log | tail -n 25
             rc=${PIPESTATUS[0]}
             set +x
