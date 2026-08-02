@@ -30,7 +30,8 @@ class EngineTest {
     fun exifToolReportsVersion() {
         val et = requireNotNull(ExifTool.get(ctx, stamp)) { "ExifTool daemon did not start" }
         val v = et.version()
-        assertTrue("unexpected version: $v", Regex("""^\d+\.\d+""").containsMatchIn(v))
+        assertTrue("unexpected version: '$v'\n" + et.diagnose(),
+                   Regex("""^\d+\.\d+""").containsMatchIn(v))
     }
 
     @Test

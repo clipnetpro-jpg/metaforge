@@ -81,6 +81,17 @@ class ExifTool private constructor(
 
     fun version(): String = execute("-ver").stdout.trim()
 
+    /** Startup diagnostics: what the engine reports about itself. */
+    fun diagnose(): String = buildString {
+        appendLine(PerlRuntime.describe())
+        appendLine("perl -V:version -> " + PerlRuntime.runOnce("-e", "print \"$]\""))
+        val v = execute("-ver")
+        appendLine("exiftool -ver   -> '${v.stdout.trim()}'")
+        if (v.stderr.isNotBlank()) appendLine("stderr: ${v.stderr}")
+        val alive = runCatching { process.exitValue(); "dead" }.getOrDefault("alive")
+        appendLine("daemon: $alive")
+    }
+
     fun close() {
         runCatching {
             stdin.write("-stay_open\nFalse\n")

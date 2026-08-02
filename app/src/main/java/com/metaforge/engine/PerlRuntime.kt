@@ -51,7 +51,17 @@ object PerlRuntime {
         if (prefs.getString(KEY_STAMP, null) != stamp || !exifToolScript.exists()) {
             root.deleteRecursively()
             root.mkdirs()
+            // Shared pure-Perl tree...
             unzipAsset(context, "perl5.zip", root)
+            // ...plus the ABI-specific part (Config.pm, Config_heavy.pl, arch dir).
+            // Without this Perl cannot load Config and almost every module fails.
+            val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull { hasAsset(context, "perl5-$it.zip") }
+            if (abi == null) {
+                Log.e(TAG, "no perl5-<abi>.zip for ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
+                return false
+            }
+            Log.i(TAG, "installing perl runtime for $abi")
+            unzipAsset(context, "perl5-$abi.zip", root)
             unzipAsset(context, "exiftool.zip", root)
             prefs.edit().putString(KEY_STAMP, stamp).apply()
         }
@@ -60,8 +70,25 @@ object PerlRuntime {
         return ready
     }
 
-    /** Arguments that put Perl's bundled library tree on @INC. */
-    fun includeArgs(): List<String> = listOf("-I", perlLib.absolutePath)
+    /** Arguments that put Perl's bundled library tree and ExifTool on @INC. */
+    fun includeArgs(): List<String> = listOf(
+        "-I", perlLib.absolutePath,
+        "-I", File(exifToolScript.parentFile, "lib").absolutePath,
+    )
+
+    private fun hasAsset(context: Context, name: String): Boolean =
+        runCatching { context.assets.open(name).close(); true }.getOrDefault(false)
+
+    /** Everything the engine knows about itself, for the diagnostics screen. */
+    fun describe(): String = buildString {
+        appendLine("binary   : ${if (::perlBinary.isInitialized) perlBinary.absolutePath else "?"}")
+        appendLine("lib      : ${if (::perlLib.isInitialized) perlLib.absolutePath else "?"}")
+        appendLine("exiftool : ${if (::exifToolScript.isInitialized) exifToolScript.absolutePath else "?"}")
+        if (::perlLib.isInitialized) {
+            appendLine("Config.pm: ${File(perlLib, "Config.pm").exists()}")
+            appendLine("libs     : ${perlLib.list()?.size ?: 0} entries")
+        }
+    }
 
     /** Runs perl once and returns stdout+stderr. Used for diagnostics only. */
     fun runOnce(vararg args: String, timeoutMs: Long = 20_000): String {
