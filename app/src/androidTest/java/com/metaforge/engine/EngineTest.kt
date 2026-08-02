@@ -91,6 +91,35 @@ class EngineTest {
         assertTrue("nothing was copied", report.copiedCount > 5)
     }
 
+    @Test
+    fun privacyStripperLeavesNothingIdentifying() {
+        val et = requireNotNull(ExifTool.get(ctx, stamp))
+        val stripper = PrivacyStripper(et)
+        val f = File(ctx.cacheDir, "priv.jpg").apply { writeBytes(MINIMAL_JPEG) }
+
+        et.execute(
+            "-EXIF:Make=Google", "-EXIF:Model=Pixel 9 Pro",
+            "-EXIF:Artist=Dev BD", "-EXIF:Software=MetaForge",
+            "-EXIF:DateTimeOriginal=2024:05:01 12:00:00",
+            "-GPS:GPSLatitude=23.8103", "-GPS:GPSLatitudeRef=N",
+            "-GPS:GPSLongitude=90.4125", "-GPS:GPSLongitudeRef=E",
+            "-XMP:Creator=Dev BD", "-IPTC:By-line=Dev BD",
+            "-overwrite_original", f.absolutePath,
+        )
+        val loaded = et.readAllJson(f.absolutePath).stdout
+        assertTrue("setup failed, no GPS written", loaded.contains("23.81"))
+
+        kotlinx.coroutines.runBlocking { stripper.strip(f).toList() }
+
+        val report = requireNotNull(stripper.lastReport)
+        assertTrue("left behind: " + report.remaining.joinToString(), report.clean)
+
+        val after = et.readAllJson(f.absolutePath).stdout
+        listOf("Pixel 9 Pro", "23.81", "90.41", "Dev BD", "Google").forEach {
+            assertTrue("still leaks \"$it\": $after", !after.contains(it))
+        }
+    }
+
     companion object {
         /** 1x1 white JPEG, smallest thing ExifTool will accept as a real image. */
         private val MINIMAL_JPEG: ByteArray = android.util.Base64.decode(

@@ -262,4 +262,91 @@ object ContainerCopier {
         }
         return out
     }
+
+    // ============================================================== STRIPPING
+
+    data class StripResult(val removed: List<String>, val note: String? = null)
+
+    /**
+     * Removes metadata blocks ExifTool cannot delete, so a privacy wipe is
+     * actually complete. C2PA/JUMBF is the main one: ExifTool parses it but has
+     * no writer, so `-all=` leaves it sitting in the file.
+     */
+    fun strip(file: File): StripResult = runCatching {
+        when (sniff(file)) {
+            Format.JPEG -> stripJpeg(file)
+            Format.PNG -> stripPng(file)
+            Format.ISOBMFF -> stripIsoBmff(file)
+            Format.UNKNOWN -> StripResult(emptyList(), "container not supported for raw strip")
+        }
+    }.getOrElse { StripResult(emptyList(), it.message ?: "raw strip failed") }
+
+    private fun stripJpeg(file: File): StripResult {
+        val segments = readJpegSegments(file)
+        // APP0 is JFIF density info: no privacy content, and some decoders like it.
+        val doomed = segments.filter { it.first != 0xE0 }
+        if (doomed.isEmpty()) return StripResult(emptyList(), "no APP segments left")
+
+        val keep = segments.filter { it.first == 0xE0 }
+        val out = File(file.parentFile, file.name + ".mfs")
+        out.outputStream().buffered().use { o ->
+            o.write(0xFF); o.write(0xD8)
+            keep.forEach { (marker, _, body) ->
+                o.write(0xFF); o.write(marker)
+                val len = body.size + 2
+                o.write((len shr 8) and 0xFF); o.write(len and 0xFF)
+                o.write(body)
+            }
+            file.inputStream().use { input ->
+                input.skip(jpegHeaderLength(file).toLong())
+                input.copyTo(o)
+            }
+        }
+        if (!out.renameTo(file)) { out.copyTo(file, overwrite = true); out.delete() }
+        return StripResult(doomed.map { "JPEG APP${it.first - 0xE0}:${it.second}" })
+    }
+
+    private val PNG_PRIVACY = setOf("caBX", "eXIf", "iTXt", "tEXt", "zTXt", "tIME", "pHYs")
+
+    private fun stripPng(file: File): StripResult {
+        val chunks = readPngChunks(file)
+        val doomed = chunks.filter { it.first in PNG_PRIVACY }
+        if (doomed.isEmpty()) return StripResult(emptyList(), "no metadata chunks present")
+
+        val out = File(file.parentFile, file.name + ".mfs")
+        out.outputStream().buffered().use { o ->
+            o.write(PNG_SIG)
+            chunks.filter { it.first !in PNG_PRIVACY }.forEach { (t, d) -> writePngChunk(o, t, d) }
+        }
+        if (!out.renameTo(file)) { out.copyTo(file, overwrite = true); out.delete() }
+        return StripResult(doomed.map { "PNG ${it.first}" })
+    }
+
+    /**
+     * ISO-BMFF: rather than removing a `uuid` box and shifting every chunk
+     * offset in the file, the box is retyped to `free` and its payload zeroed.
+     * Same byte length, so sample offsets stay valid and the media is untouched,
+     * but the metadata is gone.
+     */
+    private fun stripIsoBmff(file: File): StripResult {
+        val boxes = readTopLevelBoxes(file).filter { it.first == "uuid" }
+        if (boxes.isEmpty()) return StripResult(emptyList(), "no uuid boxes present")
+        RandomAccessFile(file, "rw").use { raf ->
+            boxes.forEach { (_, offset, size) ->
+                raf.seek(offset)
+                val bigHeader = (raf.readInt().toLong() and 0xFFFFFFFFL) == 1L
+                val headerLen = if (bigHeader) 16L else 8L
+                raf.seek(offset + 4)
+                raf.write("free".toByteArray(Charsets.ISO_8859_1))
+                raf.seek(offset + headerLen)
+                var left = size - headerLen
+                val zeros = ByteArray(64 * 1024)
+                while (left > 0) {
+                    val n = minOf(left, zeros.size.toLong()).toInt()
+                    raf.write(zeros, 0, n); left -= n
+                }
+            }
+        }
+        return StripResult(boxes.map { "MP4 uuid (${it.third} bytes)" })
+    }
 }
