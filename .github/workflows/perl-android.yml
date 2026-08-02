@@ -23,17 +23,17 @@ jobs:
             triple: aarch64-linux-android
             clang: aarch64-linux-android
             qemu: qemu-aarch64-static
-            api: 24
+            api: 26
           - abi: armeabi-v7a
             triple: arm-linux-androideabi
             clang: armv7a-linux-androideabi
             qemu: qemu-arm-static
-            api: 24
+            api: 26
           - abi: x86_64
             triple: x86_64-linux-android
             clang: x86_64-linux-android
             qemu: qemu-x86_64-static
-            api: 24
+            api: 26
     steps:
       - uses: actions/checkout@v4
 
@@ -98,6 +98,18 @@ jobs:
             -Ud_getspnam \
             -Ud_setpwent_r \
             -Ud_endpwent_r
+
+      - name: Patch for bionic
+        working-directory: perl-${{ env.PERL_VERSION }}
+        run: |
+          set -euxo pipefail
+          # Android's libc gained ctermid() only in API 26 and never had cuserid().
+          # Confirm the toolchain really declares it; stub it out otherwise.
+          if ! grep -rq "ctermid" "$SYSROOT/usr/include/stdio.h"; then
+            echo "stubbing ctermid"
+            sed -i 's|^\tRETVAL = ctermid(s);|\tRETVAL = (char *) not_here("ctermid");|' ext/POSIX/POSIX.xs
+          fi
+          grep -n "ctermid" "$SYSROOT/usr/include/stdio.h" || true
 
       - name: Build
         working-directory: perl-${{ env.PERL_VERSION }}

@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.metaforge.app"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 35
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         versionName = "0.1.${System.getenv("GITHUB_RUN_NUMBER") ?: "0"}"
