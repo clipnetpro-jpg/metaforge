@@ -22,85 +22,120 @@ jobs:
           - abi: arm64-v8a
             triple: aarch64-linux-android
             clang: aarch64-linux-android
+            qemu: qemu-aarch64-static
             api: 24
           - abi: armeabi-v7a
             triple: arm-linux-androideabi
             clang: armv7a-linux-androideabi
+            qemu: qemu-arm-static
             api: 24
           - abi: x86_64
             triple: x86_64-linux-android
             clang: x86_64-linux-android
+            qemu: qemu-x86_64-static
             api: 24
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install host tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static file
+
       - name: Show NDK
         run: |
           echo "NDK: $ANDROID_NDK_LATEST_HOME"
-          ls "$ANDROID_NDK_LATEST_HOME" || true
           cat "$ANDROID_NDK_LATEST_HOME/source.properties" || true
 
       - name: Fetch sources
         run: |
-          set -eux
+          set -euxo pipefail
           curl -fsSLO "https://www.cpan.org/src/5.0/perl-${PERL_VERSION}.tar.gz"
           curl -fsSLO "https://github.com/arsv/perl-cross/releases/download/${PERL_CROSS_VERSION}/perl-cross-${PERL_CROSS_VERSION}.tar.gz"
           tar -xzf "perl-${PERL_VERSION}.tar.gz"
           tar -xzf "perl-cross-${PERL_CROSS_VERSION}.tar.gz"
           cp -a "perl-cross-${PERL_CROSS_VERSION}/." "perl-${PERL_VERSION}/"
 
-      - name: Configure + build
+      - name: Configure
         working-directory: perl-${{ env.PERL_VERSION }}
         run: |
-          set -eux
+          set -euxo pipefail
           TOOLCHAIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-          export SYSROOT="$TOOLCHAIN/sysroot"
+          {
+            echo "TOOLCHAIN=$TOOLCHAIN"
+            echo "SYSROOT=$TOOLCHAIN/sysroot"
+            echo "CC=$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang"
+            echo "CXX=$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang++"
+            echo "AR=$TOOLCHAIN/bin/llvm-ar"
+            echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib"
+            echo "STRIP=$TOOLCHAIN/bin/llvm-strip"
+            echo "NM=$TOOLCHAIN/bin/llvm-nm"
+            echo "READELF=$TOOLCHAIN/bin/llvm-readelf"
+            echo "OBJDUMP=$TOOLCHAIN/bin/llvm-objdump"
+            echo "LD=$TOOLCHAIN/bin/ld.lld"
+          } >> "$GITHUB_ENV"
           export CC="$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang"
-          export CXX="$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang++"
-          export AR="$TOOLCHAIN/bin/llvm-ar"
-          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
-          export STRIP="$TOOLCHAIN/bin/llvm-strip"
-          export NM="$TOOLCHAIN/bin/llvm-nm"
-          export READELF="$TOOLCHAIN/bin/llvm-readelf"
-          export OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
+          export AR="$TOOLCHAIN/bin/llvm-ar" RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+          export STRIP="$TOOLCHAIN/bin/llvm-strip" NM="$TOOLCHAIN/bin/llvm-nm"
+          export READELF="$TOOLCHAIN/bin/llvm-readelf" OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
           export LD="$TOOLCHAIN/bin/ld.lld"
           "$CC" --version
 
+          # Bionic (Android libc) is missing a handful of POSIX calls that
+          # perl-cross probes optimistically during cross-compilation.
           ./configure \
             --target=${{ matrix.triple }} \
-            --sysroot="$SYSROOT" \
+            --sysroot="$TOOLCHAIN/sysroot" \
             --prefix=/system/metaforge/perl \
             --all-static \
             -Dusedl=undef \
-            -Dcc="$CC" \
             -Duseshrplib=false \
-            || { echo "::error::configure failed"; tail -n 200 config.log 2>/dev/null; exit 1; }
+            -Dcc="$CC" \
+            -Ud_ctermid \
+            -Ud_cuserid \
+            -Ud_sockatmark \
+            -Ud_crypt \
+            -Ud_getspnam \
+            -Ud_setpwent_r \
+            -Ud_endpwent_r
 
-          make -j"$(nproc)" 2>&1 | tail -n 400
-
-      - name: Inspect result
+      - name: Build
         working-directory: perl-${{ env.PERL_VERSION }}
         run: |
-          set -eux
+          set -euo pipefail
+          if ! make -j"$(nproc)" > build.log 2>&1; then
+            echo "::group::build failure tail"
+            grep -nE "error:|Error [0-9]" build.log | tail -n 60 || true
+            echo "::endgroup::"
+            tail -n 150 build.log
+            exit 1
+          fi
+          tail -n 20 build.log
+
+      - name: Verify binary runs (qemu)
+        working-directory: perl-${{ env.PERL_VERSION }}
+        run: |
+          set -euxo pipefail
           file ./perl
           ls -lh ./perl
-          "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d ./perl | head -n 40
+          ${{ matrix.qemu }} -L "$SYSROOT" ./perl -e 'print "PERL OK $] $^O\n"' \
+            || echo "::warning::qemu smoke test failed (will verify on emulator instead)"
 
       - name: Stage output
         working-directory: perl-${{ env.PERL_VERSION }}
         run: |
-          set -eux
+          set -euxo pipefail
           OUT="$GITHUB_WORKSPACE/out/${{ matrix.abi }}"
           mkdir -p "$OUT/jniLibs" "$OUT/perl5"
           cp ./perl "$OUT/jniLibs/libperl.so"
-          "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" "$OUT/jniLibs/libperl.so" || true
-          make DESTDIR="$GITHUB_WORKSPACE/perlroot" install >/dev/null 2>&1 || true
-          if [ -d "$GITHUB_WORKSPACE/perlroot/system/metaforge/perl/lib" ]; then
-            cp -a "$GITHUB_WORKSPACE/perlroot/system/metaforge/perl/lib/." "$OUT/perl5/"
-          else
-            cp -a ./lib/. "$OUT/perl5/"
-          fi
-          du -sh "$OUT"/*
+          "$STRIP" "$OUT/jniLibs/libperl.so"
+          make DESTDIR="$GITHUB_WORKSPACE/perlroot" install > install.log 2>&1 || tail -n 40 install.log
+          SRC="$GITHUB_WORKSPACE/perlroot/system/metaforge/perl/lib"
+          if [ -d "$SRC" ]; then cp -a "$SRC/." "$OUT/perl5/"; else cp -a ./lib/. "$OUT/perl5/"; fi
+          # Trim what ExifTool never needs: pods, tests, manpages
+          find "$OUT/perl5" -name '*.pod' -delete
+          find "$OUT/perl5" -type d -name 't' -prune -exec rm -rf {} + 2>/dev/null || true
+          echo "sizes:"; du -sh "$OUT"/*; du -sh "$OUT"
 
       - uses: actions/upload-artifact@v4
         with:
