@@ -96,17 +96,6 @@ jobs:
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
 
-      - name: Run engine tests on emulator
-        if: inputs.run_emulator_test
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 30
-          arch: x86_64
-          target: google_apis
-          profile: pixel_5
-          disable-animations: true
-          script: gradle --no-daemon connectedDebugAndroidTest
-
       - name: Collect APKs
         run: |
           set -euxo pipefail
@@ -119,3 +108,35 @@ jobs:
           name: MetaForge-APK
           path: dist/*.apk
           retention-days: 90
+
+      - name: Enable KVM
+        if: inputs.run_emulator_test
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || true
+
+      - name: Run engine tests on emulator
+        if: inputs.run_emulator_test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: default
+          profile: pixel_5
+          ram-size: 4096M
+          disk-size: 6G
+          force-avd-creation: true
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          script: gradle --no-daemon connectedDebugAndroidTest
+
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.run_emulator_test
+        with:
+          name: engine-test-report
+          path: app/build/reports/androidTests/**
+          retention-days: 30
