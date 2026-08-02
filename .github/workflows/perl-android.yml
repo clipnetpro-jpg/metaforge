@@ -98,14 +98,19 @@ jobs:
               echo "BUILD OK on attempt $attempt"; BUILT=1; echo "::endgroup::"; break
             fi
 
-            MISSING=$(grep -oP "call to undeclared function '\K[a-zA-Z_0-9]+" build.log | sort -u | tr '\n' ' ')
+            echo "----- compile errors (attempt $attempt) -----"
+            { grep -nE "error:|Error [0-9]" build.log | head -n 40; } || true
+            echo "----- last 60 lines -----"
+            tail -n 60 build.log || true
+
+            MISSING=$({ grep -oP "call to undeclared function .\K[a-zA-Z_0-9]+" build.log \
+                        || true; } | sort -u | tr '\n' ' ')
             echo "missing symbols: [$MISSING]"
-            grep -nE "error:" build.log | head -n 20
             echo "::endgroup::"
 
             if [ -z "$MISSING" ] || [ "$MISSING" = "$LAST_MISSING" ]; then
               echo "::error::build failed and cannot be auto-healed"
-              grep -nE "error:" build.log | head -n 40
+              { grep -nE "error:" build.log | head -n 40; } || true
               exit 1
             fi
             LAST_MISSING="$MISSING"
