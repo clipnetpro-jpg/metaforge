@@ -9,7 +9,7 @@ on:
         default: true
 
 env:
-  EXIFTOOL_VERSION: '13.10'
+  EXIFTOOL_VERSION: '13.59'
 
 jobs:
   perl:
@@ -30,10 +30,11 @@ jobs:
       - name: Fetch ExifTool
         run: |
           set -euxo pipefail
+          # exiftool.org only hosts the current release; the GitHub mirror is versioned.
           curl -fsSL -o exiftool.tar.gz \
-            "https://exiftool.org/Image-ExifTool-${EXIFTOOL_VERSION}.tar.gz"
+            "https://github.com/exiftool/exiftool/archive/refs/tags/${EXIFTOOL_VERSION}.tar.gz"
           tar -xzf exiftool.tar.gz
-          mv "Image-ExifTool-${EXIFTOOL_VERSION}" exiftool-src
+          mv "exiftool-${EXIFTOOL_VERSION}" exiftool-src
           test -f exiftool-src/exiftool
           test -d exiftool-src/lib/Image/ExifTool
 
