@@ -15,39 +15,29 @@ jobs:
   build:
     name: perl / ${{ matrix.abi }}
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
         include:
-          - abi: arm64-v8a
-            triple: aarch64-linux-android
-            clang: aarch64-linux-android
-            qemu: qemu-aarch64-static
-            api: 26
-          - abi: armeabi-v7a
-            triple: arm-linux-androideabi
-            clang: armv7a-linux-androideabi
-            qemu: qemu-arm-static
-            api: 26
-          - abi: x86_64
-            triple: x86_64-linux-android
-            clang: x86_64-linux-android
-            qemu: qemu-x86_64-static
-            api: 26
+          - { abi: arm64-v8a,   triple: aarch64-linux-android,   clang: aarch64-linux-android,    qemu: qemu-aarch64-static, api: 26 }
+          - { abi: armeabi-v7a, triple: arm-linux-androideabi,   clang: armv7a-linux-androideabi, qemu: qemu-arm-static,     api: 26 }
+          - { abi: x86_64,      triple: x86_64-linux-android,    clang: x86_64-linux-android,     qemu: qemu-x86_64-static,  api: 26 }
     steps:
       - uses: actions/checkout@v4
 
       - name: Install host tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-static file
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static file
 
-      - name: Show NDK
-        run: |
-          echo "NDK: $ANDROID_NDK_LATEST_HOME"
-          cat "$ANDROID_NDK_LATEST_HOME/source.properties" || true
+      - name: Cache built Perl
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: out/${{ matrix.abi }}
+          key: perl-${{ matrix.abi }}-${{ env.PERL_VERSION }}-${{ env.PERL_CROSS_VERSION }}-v3
 
       - name: Fetch sources
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -euxo pipefail
           curl -fsSLO "https://www.cpan.org/src/5.0/perl-${PERL_VERSION}.tar.gz"
@@ -56,84 +46,79 @@ jobs:
           tar -xzf "perl-cross-${PERL_CROSS_VERSION}.tar.gz"
           cp -a "perl-cross-${PERL_CROSS_VERSION}/." "perl-${PERL_VERSION}/"
 
-      - name: Configure
-        working-directory: perl-${{ env.PERL_VERSION }}
-        run: |
-          set -euxo pipefail
-          TOOLCHAIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-          {
-            echo "TOOLCHAIN=$TOOLCHAIN"
-            echo "SYSROOT=$TOOLCHAIN/sysroot"
-            echo "CC=$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang"
-            echo "CXX=$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang++"
-            echo "AR=$TOOLCHAIN/bin/llvm-ar"
-            echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib"
-            echo "STRIP=$TOOLCHAIN/bin/llvm-strip"
-            echo "NM=$TOOLCHAIN/bin/llvm-nm"
-            echo "READELF=$TOOLCHAIN/bin/llvm-readelf"
-            echo "OBJDUMP=$TOOLCHAIN/bin/llvm-objdump"
-            echo "LD=$TOOLCHAIN/bin/ld.lld"
-          } >> "$GITHUB_ENV"
-          export CC="$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang"
-          export AR="$TOOLCHAIN/bin/llvm-ar" RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
-          export STRIP="$TOOLCHAIN/bin/llvm-strip" NM="$TOOLCHAIN/bin/llvm-nm"
-          export READELF="$TOOLCHAIN/bin/llvm-readelf" OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
-          export LD="$TOOLCHAIN/bin/ld.lld"
-          "$CC" --version
-
-          # Bionic (Android libc) is missing a handful of POSIX calls that
-          # perl-cross probes optimistically during cross-compilation.
-          ./configure \
-            --target=${{ matrix.triple }} \
-            --sysroot="$TOOLCHAIN/sysroot" \
-            --prefix=/system/metaforge/perl \
-            --all-static \
-            -Dusedl=undef \
-            -Duseshrplib=false \
-            -Dcc="$CC" \
-            -Ud_ctermid \
-            -Ud_cuserid \
-            -Ud_sockatmark \
-            -Ud_crypt \
-            -Ud_getspnam \
-            -Ud_setpwent_r \
-            -Ud_endpwent_r
-
-      - name: Patch for bionic
-        working-directory: perl-${{ env.PERL_VERSION }}
-        run: |
-          set -euxo pipefail
-          # Android's libc gained ctermid() only in API 26 and never had cuserid().
-          # Confirm the toolchain really declares it; stub it out otherwise.
-          if ! grep -rq "ctermid" "$SYSROOT/usr/include/stdio.h"; then
-            echo "stubbing ctermid"
-            sed -i 's|^\tRETVAL = ctermid(s);|\tRETVAL = (char *) not_here("ctermid");|' ext/POSIX/POSIX.xs
-          fi
-          grep -n "ctermid" "$SYSROOT/usr/include/stdio.h" || true
-
-      - name: Build
+      - name: Configure and build (self-healing)
+        if: steps.cache.outputs.cache-hit != 'true'
         working-directory: perl-${{ env.PERL_VERSION }}
         run: |
           set -euo pipefail
-          if ! make -j"$(nproc)" > build.log 2>&1; then
-            echo "::group::build failure tail"
-            grep -nE "error:|Error [0-9]" build.log | tail -n 60 || true
+          TOOLCHAIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          export SYSROOT="$TOOLCHAIN/sysroot"
+          export CC="$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang"
+          export CXX="$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang++"
+          export AR="$TOOLCHAIN/bin/llvm-ar"   RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+          export STRIP="$TOOLCHAIN/bin/llvm-strip" NM="$TOOLCHAIN/bin/llvm-nm"
+          export READELF="$TOOLCHAIN/bin/llvm-readelf" OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
+          export LD="$TOOLCHAIN/bin/ld.lld"
+          echo "SYSROOT=$SYSROOT" >> "$GITHUB_ENV"
+          echo "STRIP=$STRIP"     >> "$GITHUB_ENV"
+          "$CC" --version
+
+          # Calls Android's bionic libc does not provide at all.
+          EXTRA="-Ud_cuserid -Ud_futimes -Ud_lchmod -Ud_sockatmark -Ud_crypt -Ud_getspnam"
+          EXTRA="$EXTRA -Ud_msgctl -Ud_msgget -Ud_msgrcv -Ud_msgsnd"
+          EXTRA="$EXTRA -Ud_semctl -Ud_semget -Ud_semop"
+          EXTRA="$EXTRA -Ud_shmat -Ud_shmctl -Ud_shmdt -Ud_shmget"
+
+          LAST_MISSING=""
+          BUILT=0
+          for attempt in 1 2 3 4 5 6 7 8; do
+            echo "::group::attempt $attempt"
+            echo "EXTRA=$EXTRA"
+            if ! ./configure \
+              --target=${{ matrix.triple }} \
+              --sysroot="$SYSROOT" \
+              --prefix=/system/metaforge/perl \
+              --all-static \
+              -Dusedl=undef \
+              -Duseshrplib=false \
+              -Dcc="$CC" \
+              -Dnoextensions="IPC/SysV GDBM_File NDBM_File ODBM_File DB_File" \
+              $EXTRA > configure.log 2>&1; then
+                tail -n 80 configure.log; echo "::endgroup::"; exit 1
+            fi
+
+            if make -j"$(nproc)" > build.log 2>&1; then
+              echo "BUILD OK on attempt $attempt"; BUILT=1; echo "::endgroup::"; break
+            fi
+
+            MISSING=$(grep -oP "call to undeclared function '\K[a-zA-Z_0-9]+" build.log | sort -u | tr '\n' ' ')
+            echo "missing symbols: [$MISSING]"
+            grep -nE "error:" build.log | head -n 20
             echo "::endgroup::"
-            tail -n 150 build.log
-            exit 1
-          fi
-          tail -n 20 build.log
+
+            if [ -z "$MISSING" ] || [ "$MISSING" = "$LAST_MISSING" ]; then
+              echo "::error::build failed and cannot be auto-healed"
+              grep -nE "error:" build.log | head -n 40
+              exit 1
+            fi
+            LAST_MISSING="$MISSING"
+            for f in $MISSING; do EXTRA="$EXTRA -Ud_$f"; done
+            make clean > /dev/null 2>&1 || true
+          done
+          [ "$BUILT" = "1" ] && [ -f ./perl ] || { echo "::error::no perl binary produced"; exit 1; }
+          echo "$EXTRA" > "$GITHUB_WORKSPACE/bionic-flags.txt"
 
       - name: Verify binary runs (qemu)
+        if: steps.cache.outputs.cache-hit != 'true'
         working-directory: perl-${{ env.PERL_VERSION }}
         run: |
           set -euxo pipefail
-          file ./perl
-          ls -lh ./perl
-          ${{ matrix.qemu }} -L "$SYSROOT" ./perl -e 'print "PERL OK $] $^O\n"' \
-            || echo "::warning::qemu smoke test failed (will verify on emulator instead)"
+          file ./perl && ls -lh ./perl
+          ${{ matrix.qemu }} -L "$SYSROOT" ./perl -e 'print "PERL OK $] on $^O\n"' \
+            || echo "::warning::qemu smoke test failed; will verify on emulator"
 
       - name: Stage output
+        if: steps.cache.outputs.cache-hit != 'true'
         working-directory: perl-${{ env.PERL_VERSION }}
         run: |
           set -euxo pipefail
@@ -144,13 +129,13 @@ jobs:
           make DESTDIR="$GITHUB_WORKSPACE/perlroot" install > install.log 2>&1 || tail -n 40 install.log
           SRC="$GITHUB_WORKSPACE/perlroot/system/metaforge/perl/lib"
           if [ -d "$SRC" ]; then cp -a "$SRC/." "$OUT/perl5/"; else cp -a ./lib/. "$OUT/perl5/"; fi
-          # Trim what ExifTool never needs: pods, tests, manpages
           find "$OUT/perl5" -name '*.pod' -delete
           find "$OUT/perl5" -type d -name 't' -prune -exec rm -rf {} + 2>/dev/null || true
-          echo "sizes:"; du -sh "$OUT"/*; du -sh "$OUT"
+          cp "$GITHUB_WORKSPACE/bionic-flags.txt" "$OUT/" 2>/dev/null || true
+          du -sh "$OUT"
 
       - uses: actions/upload-artifact@v4
         with:
           name: perl-${{ matrix.abi }}
           path: out/${{ matrix.abi }}
-          retention-days: 30
+          retention-days: 90
