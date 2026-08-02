@@ -27,6 +27,19 @@ class EngineTest {
     }
 
     @Test
+    fun exifToolScriptRunsOneShot() {
+        assertTrue(PerlRuntime.ensureReady(ctx, stamp))
+        val out = PerlRuntime.runOnce(PerlRuntime.exifToolScript.absolutePath, "-ver")
+        android.util.Log.i("ExifTool", "one-shot -ver output:\n$out")
+        android.util.Log.i("PerlRuntime", PerlRuntime.describe())
+        assertTrue(
+            "exiftool one-shot failed.\n--- output ---\n$out\n--- runtime ---\n" +
+                PerlRuntime.describe(),
+            Regex("""\d+\.\d+""").containsMatchIn(out),
+        )
+    }
+
+    @Test
     fun exifToolReportsVersion() {
         val et = requireNotNull(ExifTool.get(ctx, stamp)) { "ExifTool daemon did not start" }
         val v = et.version()

@@ -132,7 +132,20 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
-          script: gradle --no-daemon connectedDebugAndroidTest
+          script: |
+            set +e
+            gradle --no-daemon connectedDebugAndroidTest
+            rc=$?
+            echo "::group::instrumentation results"
+            for f in $(find app/build/outputs/androidTest-results -name '*.xml' 2>/dev/null); do
+              echo "----- $f -----"
+              sed -e 's/&#10;/\n/g' "$f" | head -c 20000
+            done
+            echo "::endgroup::"
+            echo "::group::logcat"
+            adb logcat -d -v brief PerlRuntime:V ExifTool:V InpaintEngine:V AndroidRuntime:E System.err:V '*:S' | tail -n 200
+            echo "::endgroup::"
+            exit $rc
 
       - uses: actions/upload-artifact@v4
         if: always() && inputs.run_emulator_test
