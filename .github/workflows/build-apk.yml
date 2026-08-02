@@ -1,0 +1,120 @@
+name: 02 - Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_emulator_test:
+        description: 'Run on-device tests in an Android emulator'
+        type: boolean
+        default: true
+
+env:
+  EXIFTOOL_VERSION: '13.10'
+
+jobs:
+  perl:
+    uses: ./.github/workflows/perl-android.yml
+
+  apk:
+    needs: perl
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: perl-*
+          path: perlout
+
+      - name: Fetch ExifTool
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o exiftool.tar.gz \
+            "https://exiftool.org/Image-ExifTool-${EXIFTOOL_VERSION}.tar.gz"
+          tar -xzf exiftool.tar.gz
+          mv "Image-ExifTool-${EXIFTOOL_VERSION}" exiftool-src
+          test -f exiftool-src/exiftool
+          test -d exiftool-src/lib/Image/ExifTool
+
+      - name: Assemble native libs and assets
+        run: |
+          set -euxo pipefail
+          JNI=app/src/main/jniLibs
+          ASSETS=app/src/main/assets
+          mkdir -p "$JNI" "$ASSETS"
+
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            mkdir -p "$JNI/$abi"
+            cp "perlout/perl-$abi/jniLibs/libperl.so" "$JNI/$abi/libperl.so"
+          done
+
+          # The Perl library tree is identical across ABIs apart from Config*
+          # and the arch directory, so ship one shared zip plus a tiny per-ABI zip.
+          BASE=perlout/perl-arm64-v8a/perl5
+          rm -rf staging && mkdir -p staging/perl5
+          cp -a "$BASE/." staging/perl5/
+          ARCHDIRS=$(find staging/perl5 -maxdepth 1 -type d -name '*-android*' -printf '%f\n' || true)
+          rm -f staging/perl5/Config.pm staging/perl5/Config_heavy.pl
+          for d in $ARCHDIRS; do rm -rf "staging/perl5/$d"; done
+          # trim things ExifTool never loads
+          rm -rf staging/perl5/unicore/TestProp.pl staging/perl5/CPAN staging/perl5/CPANPLUS \
+                 staging/perl5/ExtUtils/CBuilder staging/perl5/TAP staging/perl5/Test2 \
+                 staging/perl5/Test staging/perl5/pod 2>/dev/null || true
+          (cd staging && zip -qr9 "../$ASSETS/perl5.zip" perl5)
+
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            rm -rf archstage && mkdir -p archstage/perl5
+            SRC="perlout/perl-$abi/perl5"
+            cp "$SRC/Config.pm" "$SRC/Config_heavy.pl" archstage/perl5/ 2>/dev/null || true
+            for d in $(find "$SRC" -maxdepth 1 -type d -name '*-android*' -printf '%f\n' || true); do
+              cp -a "$SRC/$d" archstage/perl5/
+            done
+            (cd archstage && zip -qr9 "../$ASSETS/perl5-$abi.zip" perl5)
+          done
+
+          rm -rf etstage && mkdir -p etstage/exiftool
+          cp exiftool-src/exiftool etstage/exiftool/exiftool
+          cp -a exiftool-src/lib etstage/exiftool/lib
+          find etstage -name '*.pod' -delete
+          (cd etstage && zip -qr9 "../$ASSETS/exiftool.zip" exiftool)
+
+          echo "${EXIFTOOL_VERSION}" > "$ASSETS/exiftool.version"
+          ls -lh "$ASSETS"
+          du -sh "$JNI"/*
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Run engine tests on emulator
+        if: inputs.run_emulator_test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          profile: pixel_5
+          disable-animations: true
+          script: gradle --no-daemon connectedDebugAndroidTest
+
+      - name: Collect APKs
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          find app/build/outputs/apk -name '*.apk' -exec cp {} dist/ \;
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MetaForge-APK
+          path: dist/*.apk
+          retention-days: 90
