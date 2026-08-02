@@ -9,71 +9,181 @@ import java.io.OutputStreamWriter
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * The real ExifTool, running on device as a long lived `-stay_open` daemon.
+ * The real ExifTool, running on device.
  *
- * Cold starting Perl costs a second or two, so the process is started once and
- * every subsequent command is written to its stdin and terminated with
- * `-execute<n>`. ExifTool answers with `{ready<n>}` on stdout, which is the
- * delimiter we read up to. Typical round trip is a few tens of milliseconds.
+ * Preferred mode is a long lived `-stay_open` daemon: Perl is started once and
+ * each command is written to its stdin, which brings a round trip down to a few
+ * tens of milliseconds instead of a second or two of interpreter start-up.
+ *
+ * The daemon is not assumed to work. It is probed at start-up, watched for
+ * death, restarted once, and if it still refuses the engine falls back to
+ * one-shot invocations. One-shot is slower but functionally identical, so a
+ * fussy device degrades in speed rather than losing features.
  */
-class ExifTool private constructor(
-    private val process: Process,
-    private val stdin: BufferedWriter,
-    private val stdout: BufferedReader,
-    private val stderr: BufferedReader,
-) {
+class ExifTool private constructor(private val context: Context) {
+
     data class Result(val stdout: String, val stderr: String, val ok: Boolean)
 
-    private val seq = AtomicInteger(0)
+    enum class Mode { DAEMON, ONE_SHOT }
+
+    /** Which path commands are currently taking, for the diagnostics screen. */
+    @Volatile
+    var mode: Mode = Mode.ONE_SHOT
+        private set
+
+    @Volatile
+    var startupError: String? = null
+        private set
+
+    private var daemon: Daemon? = null
     private val lock = Any()
+    private var restarts = 0
 
-    fun execute(vararg args: String): Result = synchronized(lock) {
-        val n = seq.incrementAndGet()
-        args.forEach { stdin.write(it); stdin.write("\n") }
-        stdin.write("-echo4\n"); stdin.write("{stderr$n}\n")
-        stdin.write("-execute$n\n")
-        stdin.flush()
+    // ------------------------------------------------------------------ daemon
 
-        val out = StringBuilder()
-        val readyMarker = "{ready$n}"
-        while (true) {
-            val line = stdout.readLine() ?: return Result(out.toString(), "engine closed", false)
-            if (line.trim() == readyMarker) break
-            out.appendLine(line)
+    private class Daemon(
+        val process: Process,
+        val stdin: BufferedWriter,
+        val stdout: BufferedReader,
+        val stderr: BufferedReader,
+    ) {
+        val seq = AtomicInteger(0)
+
+        val alive: Boolean
+            get() = runCatching { process.exitValue(); false }.getOrDefault(true)
+
+        fun exec(args: Array<out String>): Result {
+            val n = seq.incrementAndGet()
+            args.forEach { stdin.write(it); stdin.write("\n") }
+            stdin.write("-execute$n\n")
+            stdin.flush()
+
+            val out = StringBuilder()
+            val marker = "{ready$n}"
+            while (true) {
+                val line = stdout.readLine() ?: return Result(out.toString(), "engine closed", false)
+                if (line.trim() == marker) break
+                out.appendLine(line)
+            }
+            val err = StringBuilder()
+            while (stderr.ready()) {
+                val line = stderr.readLine() ?: break
+                err.appendLine(line)
+            }
+            return Result(out.toString().trim(), err.toString().trim(), true)
         }
 
-        val err = StringBuilder()
-        while (stderr.ready()) {
-            val line = stderr.readLine() ?: break
-            if (line.trim() == "{stderr$n}") break
-            err.appendLine(line)
+        fun close() {
+            runCatching { stdin.write("-stay_open\nFalse\n"); stdin.flush() }
+            runCatching { process.destroy() }
         }
-        Result(out.toString().trim(), err.toString().trim(), true)
     }
 
-    /** Full metadata of a file as JSON, every group, numeric duplicates kept. */
+    private fun startDaemon(): Daemon? {
+        val cmd = mutableListOf(PerlRuntime.perlBinary.absolutePath)
+        cmd += PerlRuntime.includeArgs()
+        // Canonical stay_open invocation. Nothing else: extra start-up options
+        // such as -common_args make ExifTool exit before it reads stdin, which
+        // is exactly how this silently broke the first time.
+        cmd += listOf(PerlRuntime.exifToolScript.absolutePath, "-stay_open", "True", "-@", "-")
+
+        val pb = ProcessBuilder(cmd)
+        pb.directory(context.filesDir)
+        pb.environment()["HOME"] = context.filesDir.absolutePath
+        pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
+        pb.environment()["PERL5LIB"] = PerlRuntime.perlLib.absolutePath
+
+        return runCatching {
+            val p = pb.start()
+            val d = Daemon(
+                p,
+                BufferedWriter(OutputStreamWriter(p.outputStream, Charsets.UTF_8)),
+                BufferedReader(InputStreamReader(p.inputStream, Charsets.UTF_8)),
+                BufferedReader(InputStreamReader(p.errorStream, Charsets.UTF_8)),
+            )
+            // Probe before trusting it.
+            val probe = d.exec(arrayOf("-ver"))
+            if (!probe.ok || !Regex("""\d+\.\d+""").containsMatchIn(probe.stdout)) {
+                startupError = buildString {
+                    append("daemon probe returned '${probe.stdout.trim()}'")
+                    if (probe.stderr.isNotBlank()) append("; stderr: ${probe.stderr}")
+                    if (!d.alive) append("; process exited ${runCatching { p.exitValue() }.getOrNull()}")
+                }
+                d.close()
+                null
+            } else {
+                d
+            }
+        }.onFailure {
+            startupError = "${it::class.simpleName}: ${it.message}"
+            Log.w(TAG, "daemon start failed, falling back to one-shot", it)
+        }.getOrNull()
+    }
+
+    // ---------------------------------------------------------------- one-shot
+
+    private fun oneShot(args: Array<out String>): Result {
+        val cmd = mutableListOf(PerlRuntime.perlBinary.absolutePath)
+        cmd += PerlRuntime.includeArgs()
+        cmd += PerlRuntime.exifToolScript.absolutePath
+        cmd += args
+        return runCatching {
+            val pb = ProcessBuilder(cmd)
+            pb.directory(context.filesDir)
+            pb.environment()["HOME"] = context.filesDir.absolutePath
+            pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
+            val p = pb.start()
+            val out = p.inputStream.bufferedReader().readText()
+            val err = p.errorStream.bufferedReader().readText()
+            p.waitFor()
+            Result(out.trim(), err.trim(), true)
+        }.getOrElse { Result("", it.message ?: "exec failed", false) }
+    }
+
+    // ------------------------------------------------------------------ public
+
+    fun execute(vararg args: String): Result = synchronized(lock) {
+        daemon?.let { d ->
+            if (d.alive) {
+                val r = runCatching { d.exec(args) }.getOrNull()
+                if (r != null && r.ok) return r
+            }
+            // Daemon died mid-session. Try once to bring it back, then give up
+            // on it for the rest of the session rather than thrashing.
+            runCatching { d.close() }
+            daemon = null
+            if (restarts < 1) {
+                restarts++
+                daemon = startDaemon()
+                mode = if (daemon != null) Mode.DAEMON else Mode.ONE_SHOT
+                daemon?.let { fresh ->
+                    val r = runCatching { fresh.exec(args) }.getOrNull()
+                    if (r != null && r.ok) return r
+                }
+            } else {
+                mode = Mode.ONE_SHOT
+            }
+        }
+        return oneShot(args)
+    }
+
     fun readAllJson(path: String): Result =
         execute("-json", "-a", "-G:0:1:2", "-u", "-struct", "-charset", "utf8", path)
 
-    /** Human readable value list. */
     fun readAll(path: String): Result =
         execute("-a", "-G1", "-s", "-charset", "utf8", path)
 
-    /**
-     * Copies every writable tag from [source] onto [target].
-     * This is ExifTool's own -tagsFromFile, so fidelity matches the desktop tool.
-     */
     fun transplantAll(source: String, target: String, overwriteOriginal: Boolean = true): Result {
-        val args = mutableListOf("-tagsFromFile", source, "-all:all")
+        val args = mutableListOf("-tagsFromFile", source, "-all:all", "-unsafe", "-icc_profile", "-m")
         if (overwriteOriginal) args += "-overwrite_original"
         args += target
         return execute(*args.toTypedArray())
     }
 
-    /** Copies only the selected tags, e.g. listOf("EXIF:Make", "EXIF:Model", "GPS:all"). */
     fun transplantTags(source: String, target: String, tags: List<String>, overwriteOriginal: Boolean = true): Result {
         val args = mutableListOf("-tagsFromFile", source)
         tags.forEach { args += "-$it" }
+        args += "-m"
         if (overwriteOriginal) args += "-overwrite_original"
         args += target
         return execute(*args.toTypedArray())
@@ -81,28 +191,24 @@ class ExifTool private constructor(
 
     fun version(): String = execute("-ver").stdout.trim()
 
-    /** Startup diagnostics: what the engine reports about itself. */
     fun diagnose(): String = buildString {
         appendLine(PerlRuntime.describe())
-        appendLine("perl -V:version -> " + PerlRuntime.runOnce("-e", "print \"$]\""))
-        val v = execute("-ver")
-        appendLine("exiftool -ver   -> '${v.stdout.trim()}'")
-        if (v.stderr.isNotBlank()) appendLine("stderr: ${v.stderr}")
-        val alive = runCatching { process.exitValue(); "dead" }.getOrDefault("alive")
-        appendLine("daemon: $alive")
+        appendLine("mode      : $mode")
+        appendLine("restarts  : $restarts")
+        startupError?.let { appendLine("daemon err: $it") }
+        appendLine("perl      : " + PerlRuntime.runOnce("-e", "print \"\$]\""))
+        val oneShotVer = oneShot(arrayOf("-ver"))
+        appendLine("one-shot  : '${oneShotVer.stdout}' ${oneShotVer.stderr}")
+        appendLine("execute   : '${execute("-ver").stdout}'")
     }
 
     fun close() {
-        runCatching {
-            stdin.write("-stay_open\nFalse\n")
-            stdin.flush()
-            process.waitFor()
-        }
-        runCatching { process.destroy() }
+        synchronized(lock) { daemon?.close(); daemon = null }
     }
 
     companion object {
         private const val TAG = "ExifTool"
+
         @Volatile private var instance: ExifTool? = null
 
         fun get(context: Context, stamp: String): ExifTool? {
@@ -110,34 +216,18 @@ class ExifTool private constructor(
             synchronized(this) {
                 instance?.let { return it }
                 if (!PerlRuntime.ensureReady(context, stamp)) return null
-                return runCatching { start(context) }
-                    .onFailure { Log.e(TAG, "daemon start failed", it) }
-                    .getOrNull()
-                    ?.also { instance = it }
+                val et = ExifTool(context.applicationContext)
+                et.daemon = et.startDaemon()
+                et.mode = if (et.daemon != null) Mode.DAEMON else Mode.ONE_SHOT
+                Log.i(TAG, "engine ready in ${et.mode} mode")
+                // Only hand back an engine that can actually answer.
+                if (!Regex("""\d+\.\d+""").containsMatchIn(et.version())) {
+                    Log.e(TAG, "engine unusable: ${et.diagnose()}")
+                    return null
+                }
+                instance = et
+                return et
             }
-        }
-
-        private fun start(context: Context): ExifTool {
-            val cmd = mutableListOf(PerlRuntime.perlBinary.absolutePath)
-            cmd += PerlRuntime.includeArgs()
-            cmd += listOf(
-                PerlRuntime.exifToolScript.absolutePath,
-                "-stay_open", "True",
-                "-@", "-",
-                "-common_args", "-charset", "filename=utf8",
-            )
-            val pb = ProcessBuilder(cmd)
-            pb.directory(context.filesDir)
-            pb.environment()["HOME"] = context.filesDir.absolutePath
-            pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
-            pb.environment()["PERL5LIB"] = PerlRuntime.perlLib.absolutePath
-            val p = pb.start()
-            return ExifTool(
-                p,
-                BufferedWriter(OutputStreamWriter(p.outputStream, Charsets.UTF_8)),
-                BufferedReader(InputStreamReader(p.inputStream, Charsets.UTF_8)),
-                BufferedReader(InputStreamReader(p.errorStream, Charsets.UTF_8)),
-            )
         }
     }
 }
