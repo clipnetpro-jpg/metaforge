@@ -1,0 +1,109 @@
+name: 01 - Build Perl for Android
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/perl-android.yml'
+      - 'native/PINS'
+
+env:
+  PERL_VERSION: 5.38.2
+  PERL_CROSS_VERSION: 1.5.2
+
+jobs:
+  build:
+    name: perl / ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            triple: aarch64-linux-android
+            clang: aarch64-linux-android
+            api: 24
+          - abi: armeabi-v7a
+            triple: arm-linux-androideabi
+            clang: armv7a-linux-androideabi
+            api: 24
+          - abi: x86_64
+            triple: x86_64-linux-android
+            clang: x86_64-linux-android
+            api: 24
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show NDK
+        run: |
+          echo "NDK: $ANDROID_NDK_LATEST_HOME"
+          ls "$ANDROID_NDK_LATEST_HOME" || true
+          cat "$ANDROID_NDK_LATEST_HOME/source.properties" || true
+
+      - name: Fetch sources
+        run: |
+          set -eux
+          curl -fsSLO "https://www.cpan.org/src/5.0/perl-${PERL_VERSION}.tar.gz"
+          curl -fsSLO "https://github.com/arsv/perl-cross/releases/download/${PERL_CROSS_VERSION}/perl-cross-${PERL_CROSS_VERSION}.tar.gz"
+          tar -xzf "perl-${PERL_VERSION}.tar.gz"
+          tar -xzf "perl-cross-${PERL_CROSS_VERSION}.tar.gz"
+          cp -a "perl-cross-${PERL_CROSS_VERSION}/." "perl-${PERL_VERSION}/"
+
+      - name: Configure + build
+        working-directory: perl-${{ env.PERL_VERSION }}
+        run: |
+          set -eux
+          TOOLCHAIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          export SYSROOT="$TOOLCHAIN/sysroot"
+          export CC="$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang"
+          export CXX="$TOOLCHAIN/bin/${{ matrix.clang }}${{ matrix.api }}-clang++"
+          export AR="$TOOLCHAIN/bin/llvm-ar"
+          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+          export STRIP="$TOOLCHAIN/bin/llvm-strip"
+          export NM="$TOOLCHAIN/bin/llvm-nm"
+          export READELF="$TOOLCHAIN/bin/llvm-readelf"
+          export OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
+          export LD="$TOOLCHAIN/bin/ld.lld"
+          "$CC" --version
+
+          ./configure \
+            --target=${{ matrix.triple }} \
+            --sysroot="$SYSROOT" \
+            --prefix=/system/metaforge/perl \
+            --all-static \
+            -Dusedl=undef \
+            -Dcc="$CC" \
+            -Duseshrplib=false \
+            || { echo "::error::configure failed"; tail -n 200 config.log 2>/dev/null; exit 1; }
+
+          make -j"$(nproc)" 2>&1 | tail -n 400
+
+      - name: Inspect result
+        working-directory: perl-${{ env.PERL_VERSION }}
+        run: |
+          set -eux
+          file ./perl
+          ls -lh ./perl
+          "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d ./perl | head -n 40
+
+      - name: Stage output
+        working-directory: perl-${{ env.PERL_VERSION }}
+        run: |
+          set -eux
+          OUT="$GITHUB_WORKSPACE/out/${{ matrix.abi }}"
+          mkdir -p "$OUT/jniLibs" "$OUT/perl5"
+          cp ./perl "$OUT/jniLibs/libperl.so"
+          "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" "$OUT/jniLibs/libperl.so" || true
+          make DESTDIR="$GITHUB_WORKSPACE/perlroot" install >/dev/null 2>&1 || true
+          if [ -d "$GITHUB_WORKSPACE/perlroot/system/metaforge/perl/lib" ]; then
+            cp -a "$GITHUB_WORKSPACE/perlroot/system/metaforge/perl/lib/." "$OUT/perl5/"
+          else
+            cp -a ./lib/. "$OUT/perl5/"
+          fi
+          du -sh "$OUT"/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perl-${{ matrix.abi }}
+          path: out/${{ matrix.abi }}
+          retention-days: 30

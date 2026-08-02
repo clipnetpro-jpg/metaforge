@@ -1,0 +1,5 @@
+# Pinned versions for reproducible native builds
+PERL_VERSION=5.38.2
+PERL_CROSS_VERSION=1.5.2
+EXIFTOOL_VERSION=13.10
+ANDROID_API=24
