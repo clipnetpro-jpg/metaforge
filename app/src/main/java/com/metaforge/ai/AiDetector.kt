@@ -107,21 +107,28 @@ class AiDetector(private val exifTool: ExifTool) {
                     confidence = 96
                 }
                 else -> {
-                    val raw = provenanceScore + forensicScore
-                    score = (50 + raw * 45).toInt().coerceIn(0, 100)
+                    // Pixel statistics are hints, so they are capped: no pile of
+                    // forensic hunches may outshout a full camera exposure
+                    // record, and forensics alone can never push past
+                    // "uncertain" into an AI verdict. That combination is what
+                    // let an ordinary phone photograph score 63/100.
+                    val forensicCapped = forensicScore.coerceIn(-0.30f, 0.30f)
+                    val raw = provenanceScore + forensicCapped
+                    score = (50 + raw * 50).toInt().coerceIn(2, 98)
                     verdict = when {
-                        score >= 72 -> Verdict.LIKELY_AI
-                        score <= 30 -> Verdict.LIKELY_AUTHENTIC
+                        score >= 75 && provenanceScore > 0f -> Verdict.LIKELY_AI
+                        score <= 25 -> Verdict.LIKELY_AUTHENTIC
                         else -> Verdict.UNCERTAIN
                     }
-                    // Confidence follows how much evidence there is and how far
-                    // it leans, never higher than a pixel-only judgement earns.
                     val lean = kotlin.math.abs(score - 50) / 50f
-                    confidence = (30 + lean * 40 + evidence.size * 2).toInt().coerceIn(20, 75)
+                    confidence = (35 + lean * 40).toInt().coerceIn(25, 80)
                 }
             }
 
             val note = when {
+                verdict == Verdict.LIKELY_AUTHENTIC ->
+                    "A full camera exposure record and natural pixel texture both point to a " +
+                        "real photograph. Only a signed credential could make this certain.",
                 watermark.identified != null ->
                     "Read out of the pixels themselves. A watermark like this survives a metadata " +
                         "wipe, a crop and a screenshot, so this is the strongest kind of answer."
@@ -141,8 +148,13 @@ class AiDetector(private val exifTool: ExifTool) {
                 heatmap = forensics.heatmap,
                 markMap = watermark.coverage,
                 markCoverage = watermark.coveragePercent,
+                // Boxes on the picture are alarming, so they are drawn only
+                // when the verdict itself leans AI. Painting "compression
+                // response even 72%" across someone's genuine photograph told
+                // them the app had caught something when it had not.
                 hotspots = watermark.marks +
-                    if (verdict == Verdict.CONFIRMED_CAPTURE) emptyList() else forensics.hotspots,
+                    if (verdict == Verdict.CONFIRMED_AI || verdict == Verdict.LIKELY_AI) forensics.hotspots
+                    else emptyList(),
                 modelAccuracyNote = note,
                 elapsedMs = (System.nanoTime() - t0) / 1_000_000,
             )

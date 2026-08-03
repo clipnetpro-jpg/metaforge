@@ -105,13 +105,19 @@ class ProvenanceScanner(private val exifTool: ExifTool) {
         // --- explicit source-type declaration --------------------------------
         tags.entries.firstOrNull { it.key.endsWith("DigitalSourceType", true) }?.let { (k, v) ->
             val ai = v.lowercase().contains("trainedalgorithmicmedia")
+            // The value is a vocabulary URI. Showing the raw URL read as if the
+            // app were phoning some website; it is a label written inside the
+            // image by whatever made it, so show it as words.
+            val label = v.substringAfterLast('/').ifBlank { v }
             found += Evidence(
                 id = "digitalsourcetype",
                 kind = EvidenceKind.PROVENANCE,
-                title = if (ai) "IPTC source type says algorithmic media" else "IPTC source type declared",
-                explanation = "The $k field records how the image came into existence.",
+                title = if (ai) "The file itself declares it was made by AI"
+                        else "The file declares how it was made",
+                explanation = "Whatever tool created this image wrote a source-type label " +
+                    "into its metadata ($k). This came out of the file, not from any website.",
                 weight = if (ai) 1f else -0.2f,
-                measurement = v,
+                measurement = "declared: $label",
                 decisive = ai,
             )
         }
@@ -165,13 +171,19 @@ class ProvenanceScanner(private val exifTool: ExifTool) {
         if (present.size >= 5) {
             val make = tags.entries.firstOrNull { it.key.endsWith(":Make") }?.value
             val model = tags.entries.firstOrNull { it.key.endsWith(":Model") }?.value
+            val named = !make.isNullOrBlank() || !model.isNullOrBlank()
+            // This is the strongest authentic signal there is short of a signed
+            // credential, and it used to be weighed so timidly that a genuine
+            // phone photo with a full exposure record still landed on the
+            // suspicious side of the scale. A named camera with eight exposure
+            // fields now outweighs every pixel statistic put together.
             found += Evidence(
                 id = "camera-exif",
                 kind = EvidenceKind.PROVENANCE,
                 title = "Full camera exposure record present",
                 explanation = "Shutter, aperture, ISO and lens fields are all filled in and " +
                     "internally consistent. Generators rarely fabricate a complete set.",
-                weight = -0.45f,
+                weight = if (named && present.size >= 8) -0.85f else -0.7f,
                 measurement = listOfNotNull(make, model).joinToString(" ")
                     .ifBlank { "${present.size} capture fields" } + " (${present.size} fields)",
             )

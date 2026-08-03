@@ -25,7 +25,7 @@ object WatermarkScanner {
     private const val QUANT = 36.0
     private const val BLOCK = 4
     private const val MIN_VOTES = 12
-    private const val STRUCTURE_Z = 3.0
+    private const val STRUCTURE_Z = 4.5
     private const val MAX_TILE = 2048
     private const val KNOWN_AGREEMENT = 0.90f
 
@@ -131,7 +131,7 @@ object WatermarkScanner {
                 }
             }
 
-            if (identified == null && best.strength >= STRUCTURE_Z) {
+            if (identified == null && best.strength >= STRUCTURE_Z && halvesAgree(best)) {
                 val text = best.asText()
                 payload = text
                 evidence += Evidence(
@@ -153,18 +153,22 @@ object WatermarkScanner {
             }
         }
 
-        if (lsb.score > 0.85f) {
+        if (lsb.score > 0.92f) {
+            // Informational only. Editing, resizing and chat-app compression
+            // all flatten fine-detail statistics; a JPEG that was ever
+            // converted to PNG trips this constantly. It said "hidden data"
+            // over an ordinary photograph, so it no longer moves the verdict
+            // and no longer draws a box.
             evidence += Evidence(
                 id = "lsb",
                 kind = EvidenceKind.FORENSIC,
-                title = "Something is stored in the finest detail of the pixels",
-                explanation = "In an untouched photograph the very last bit of each pixel is " +
-                    "sensor noise and behaves randomly. Here it is too even, which is what " +
-                    "happens when data has been tucked inside the image.",
-                weight = 0.3f,
-                measurement = "${(lsb.score * 100).toInt()}% of the picture affected",
+                title = "Fine-detail statistics are unusual",
+                explanation = "The finest detail of the pixels is more even than raw camera " +
+                    "output. This is common after editing, resizing or messaging-app " +
+                    "compression, so on its own it says nothing about AI.",
+                weight = 0f,
+                measurement = "${(lsb.score * 100).toInt()}% of sampled regions",
             )
-            lsb.region?.let { marks += Hotspot(it, 0.7f, "hidden data", null) }
         }
 
         if (identified != null) {
@@ -185,7 +189,7 @@ object WatermarkScanner {
             identified = identified,
             payload = payload,
             marks = marks,
-            removable = identified != null || evidence.any { it.id == "watermark-unknown" || it.id == "lsb" },
+            removable = identified != null || evidence.any { it.id == "watermark-unknown" },
             coverage = coverage,
             coveragePercent = coveragePercent,
         )
@@ -368,6 +372,14 @@ object WatermarkScanner {
 
         for (length in LENGTHS) {
             if (blocks / length < MIN_VOTES) continue
+            // When the grid width divides the period, slot i only ever samples
+            // columns congruent to i. Then any vertical structure in the scene,
+            // a door frame, the edge of a television, reads as a strong
+            // "repeating mark": that is exactly how a photograph of a TV on a
+            // wall came back as watermarked. In that geometry image structure
+            // and a mark are mathematically indistinguishable, so the reading
+            // is not taken at all.
+            if (cols % length == 0) continue
             val slotOnes = IntArray(length)
             val slotTotal = IntArray(length)
             for (i in 0 until blocks) {
@@ -498,6 +510,44 @@ object WatermarkScanner {
             if (abs(a - expected) / expected < 0.06) matched++
         }
         return if (pairs < 8) null else matched.toFloat() / pairs
+    }
+
+    /**
+     * True when the top and bottom halves of the region, decoded independently,
+     * carry the same payload.
+     *
+     * A real watermark is repeated across the whole frame, so both halves must
+     * read the same. A pattern produced by the scene itself, an edge, a
+     * gradient, texture, changes with the content, and the halves disagree.
+     * This is the difference between a mark and a coincidence.
+     */
+    private fun halvesAgree(reading: Reading): Boolean {
+        val cols = reading.gridCols
+        val rows = reading.gridRows
+        val len = reading.length
+        if (cols <= 0 || rows < 8) return false
+        val topCount = (rows / 2) * cols
+        val total = reading.blockBits.size
+        if (topCount / len < 6 || (total - topCount) / len < 6) return false
+
+        fun decode(from: Int, to: Int): IntArray? {
+            val ones = IntArray(len)
+            val slots = IntArray(len)
+            var one = 0
+            for (i in from until to) {
+                val slot = i % len
+                slots[slot]++
+                if (reading.blockBits[i].toInt() == 1) { ones[slot]++; one++ }
+            }
+            val rate = one.toDouble() / (to - from)
+            if (rate < 0.02 || rate > 0.98) return null
+            return IntArray(len) { if (slots[it] == 0) 0 else if (ones[it].toDouble() / slots[it] > rate) 1 else 0 }
+        }
+
+        val top = decode(0, topCount) ?: return false
+        val bottom = decode(topCount, total) ?: return false
+        val agree = top.indices.count { top[it] == bottom[it] }.toFloat() / len
+        return agree >= 0.85f
     }
 
     // ----------------------------------------------------------------- helpers

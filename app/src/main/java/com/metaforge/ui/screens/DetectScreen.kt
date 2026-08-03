@@ -355,6 +355,20 @@ fun DetectScreen(onBack: () -> Unit) {
                 )
             }
 
+            // Saving a copy must never depend on having removed anything:
+            // being unable to get the picture back out was read, fairly, as
+            // "download does not work".
+            if (staged != null && cleanReport == null) {
+                Spacer(Modifier.height(16.dp))
+                OutlinedButton(
+                    onClick = exportCopy,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Save a copy of this picture", color = Accent)
+                }
+            }
+
             if (written) {
                 Spacer(Modifier.height(12.dp))
                 UndoRow(
@@ -388,47 +402,70 @@ fun DetectScreen(onBack: () -> Unit) {
 
 @Composable
 private fun VerdictCard(r: DetectionResult) {
-    val (label, tint) = when (r.verdict) {
-        Verdict.CONFIRMED_AI -> "AI generated, confirmed by the file itself" to Bad
-        Verdict.LIKELY_AI -> "Probably AI generated" to Warn
-        Verdict.UNCERTAIN -> "Cannot tell" to Muted
-        Verdict.LIKELY_AUTHENTIC -> "Probably a real photograph" to Good
-        Verdict.CONFIRMED_CAPTURE -> "Camera capture, confirmed by a credential" to Good
+    // One glance must answer the only question the user has: real or AI.
+    // Green means real, red means AI, amber means honestly unsure. The
+    // numbers and the caveats stay, but below the answer, not instead of it.
+    data class V(val label: String, val plain: String, val tint: Color)
+    val v = when (r.verdict) {
+        Verdict.CONFIRMED_AI -> V(
+            "AI-made",
+            "The file itself says it was made by AI. This is proof, not a guess.",
+            Bad,
+        )
+        Verdict.LIKELY_AI -> V(
+            "Looks AI-made",
+            "Strong signs of generation, though nothing in the file proves it outright.",
+            Bad,
+        )
+        Verdict.UNCERTAIN -> V(
+            "Can't be sure",
+            "Nothing in this file declares where it came from, and pixels alone cannot " +
+                "settle it. An honest tool says so instead of guessing.",
+            Warn,
+        )
+        Verdict.LIKELY_AUTHENTIC -> V(
+            "Looks like a real photo",
+            "A full camera record and natural pixel texture point to a genuine photograph.",
+            Good,
+        )
+        Verdict.CONFIRMED_CAPTURE -> V(
+            "Real photo",
+            "A signed camera credential proves this was captured, not generated.",
+            Good,
+        )
     }
     Card(
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = tint.copy(alpha = 0.12f)),
+        colors = CardDefaults.cardColors(containerColor = v.tint.copy(alpha = 0.14f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(20.dp)) {
-            Text(label, color = tint, fontWeight = FontWeight.Bold, fontSize = 19.sp)
-            Spacer(Modifier.height(10.dp))
-            if (r.isProven) {
-                Text(
-                    "Proof, not a guess.",
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
-                )
-            } else {
-                Text(
-                    "AI score ${r.aiScore} / 100, confidence ${r.confidence}%",
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(6.dp))
+            Text(v.label, color = v.tint, fontWeight = FontWeight.Bold, fontSize = 26.sp)
+            Spacer(Modifier.height(6.dp))
+            Text(v.plain, color = Color.White, fontSize = 14.sp, lineHeight = 20.sp)
+            if (!r.isProven) {
+                Spacer(Modifier.height(12.dp))
                 LinearProgressIndicator(
                     progress = { r.aiScore / 100f },
                     modifier = Modifier.fillMaxWidth(),
-                    color = tint,
+                    color = v.tint,
                     trackColor = Color.White.copy(alpha = 0.08f),
                 )
+                Spacer(Modifier.height(4.dp))
+                Row(Modifier.fillMaxWidth()) {
+                    Text("real", color = Good, fontSize = 11.sp)
+                    Text(
+                        "score ${r.aiScore}/100 · confidence ${r.confidence}%",
+                        color = Muted,
+                        fontSize = 11.sp,
+                        modifier = Modifier.weight(1f),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
+                    Text("AI", color = Bad, fontSize = 11.sp)
+                }
             }
             Spacer(Modifier.height(10.dp))
             Text(r.modelAccuracyNote, color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
-            Spacer(Modifier.height(6.dp))
-            Text("${r.elapsedMs} ms", color = Muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
         }
     }
 }
@@ -563,6 +600,7 @@ private fun SwitchRow(
 
 @Composable
 private fun CleanedCard(report: WatermarkRemover.Report) {
+    val hadMark = report.markBefore != null
     val ok = !report.stillPresent && report.markAfter == null
     Card(
         shape = RoundedCornerShape(20.dp),
@@ -573,7 +611,11 @@ private fun CleanedCard(report: WatermarkRemover.Report) {
     ) {
         Column(Modifier.padding(18.dp)) {
             Text(
-                if (ok) "The mark is gone" else "Something is still readable",
+                when {
+                    !hadMark -> "Nothing needed removing"
+                    ok -> "The mark is gone"
+                    else -> "Something is still readable"
+                },
                 color = if (ok) Good else Warn,
                 fontWeight = FontWeight.Bold,
                 fontSize = 18.sp,
@@ -583,8 +625,11 @@ private fun CleanedCard(report: WatermarkRemover.Report) {
                 Text("was carrying: $it", color = Color.White, fontSize = 13.sp)
             }
             Text(
-                if (ok) "checked again afterwards and nothing readable came back"
-                else "still reads: " + (report.markAfter ?: "an unnamed pattern"),
+                when {
+                    !hadMark -> "no verified mark was in this picture, so its pixels were left alone"
+                    ok -> "checked again afterwards and nothing readable came back"
+                    else -> "still reads: " + (report.markAfter ?: "an unnamed pattern")
+                },
                 color = Muted,
                 fontSize = 12.sp,
             )

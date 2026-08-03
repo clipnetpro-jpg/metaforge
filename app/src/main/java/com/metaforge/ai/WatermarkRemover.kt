@@ -59,8 +59,13 @@ object WatermarkRemover {
 
         var working = source.copy(Bitmap.Config.ARGB_8888, true)
 
-        if (options.removeHiddenMark) {
+        if (options.removeHiddenMark && before.removable) {
             stage("erase") { erase(working) }
+        } else if (options.removeHiddenMark) {
+            // Running the eraser over a picture with no verified mark would
+            // change pixels for nothing and then announce success at removing
+            // something that was never there.
+            skip("erase", "no verified mark in this picture, nothing to erase")
         } else {
             skip("erase", "left in place")
         }
@@ -75,7 +80,8 @@ object WatermarkRemover {
         val diff = difference(source, working)
         lastReport = Report(
             cleaned = working,
-            markBefore = before.identified ?: before.payload,
+            markBefore = before.identified ?: before.payload
+                ?: if (before.removable) "an unnamed repeating pattern" else null,
             markAfter = after.identified ?: after.payload,
             stillPresent = after.identified != null,
             visualDifference = diff,
