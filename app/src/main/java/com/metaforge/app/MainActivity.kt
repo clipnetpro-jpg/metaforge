@@ -83,6 +83,7 @@ private fun MetaForgeNav() {
                 onTransplant = { nav.navigate("transplant") },
                 onStrip = { nav.navigate("strip") },
                 onDetect = { nav.navigate("detect") },
+                onProfiles = { nav.navigate("profiles") },
                 onDiagnostics = { nav.navigate("diagnostics") },
             )
         }
@@ -90,6 +91,7 @@ private fun MetaForgeNav() {
         composable("transplant") { TransplantScreen(onBack = { nav.popBackStack() }) }
         composable("strip") { StripScreen(onBack = { nav.popBackStack() }) }
         composable("detect") { DetectScreen(onBack = { nav.popBackStack() }) }
+        composable("profiles") { ProfilesScreen(onBack = { nav.popBackStack() }) }
         composable("diagnostics") { DiagnosticsScreen(onBack = { nav.popBackStack() }) }
     }
 }

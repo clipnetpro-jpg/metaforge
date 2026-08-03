@@ -33,6 +33,7 @@ fun HomeScreen(
     onTransplant: () -> Unit,
     onStrip: () -> Unit,
     onDetect: () -> Unit,
+    onProfiles: () -> Unit,
     onDiagnostics: () -> Unit,
 ) {
     MetaForgeBackground {
@@ -107,9 +108,19 @@ fun HomeScreen(
                 onClick = onDetect,
             )
 
+            Spacer(Modifier.height(12.dp))
+            ActionCard(
+                icon = Icons.Rounded.Bookmarks,
+                title = "Saved profiles",
+                body = "Keep an identity you have already worked out and put it on the next file " +
+                    "in one tap, reviewing every tag before it is written.",
+                enabled = engineReady,
+                onClick = onProfiles,
+            )
+
             Spacer(Modifier.height(20.dp))
             TextButton(onClick = onDiagnostics) {
-                Text("Engine diagnostics", color = Muted, fontSize = 13.sp)
+                Text("Engine report", color = Muted, fontSize = 13.sp)
             }
             Spacer(Modifier.height(28.dp))
         }
