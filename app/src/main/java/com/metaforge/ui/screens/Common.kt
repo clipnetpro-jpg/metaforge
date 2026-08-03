@@ -173,3 +173,72 @@ fun humanSize(bytes: Long): String = when {
     bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
     else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
 }
+
+/**
+ * A "save a copy where I choose" picker.
+ *
+ * Writing back over the original is one option, not the only one: a user who is
+ * experimenting deserves to keep the original untouched and take the result out
+ * to their Downloads folder instead.
+ */
+@Composable
+fun rememberExportPicker(
+    suggestedName: String,
+    mimeType: String,
+    onChosen: (Uri) -> Unit,
+): () -> Unit {
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(mimeType),
+    ) { uri -> if (uri != null) onChosen(uri) }
+    return { launcher.launch(suggestedName) }
+}
+
+fun mimeForName(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
+    "jpg", "jpeg" -> "image/jpeg"
+    "png" -> "image/png"
+    "webp" -> "image/webp"
+    "heic", "heif" -> "image/heif"
+    "avif" -> "image/avif"
+    "tif", "tiff" -> "image/tiff"
+    "dng" -> "image/x-adobe-dng"
+    "mp4", "m4v" -> "video/mp4"
+    "mov" -> "video/quicktime"
+    "mkv" -> "video/x-matroska"
+    "webm" -> "video/webm"
+    else -> "application/octet-stream"
+}
+
+/** "name_metaforge.jpg" from "name.jpg". */
+fun copyName(name: String, suffix: String = "_metaforge"): String {
+    val base = name.substringBeforeLast('.', name)
+    val ext = name.substringAfterLast('.', "")
+    return if (ext.isEmpty()) "$base$suffix" else "$base$suffix.$ext"
+}
+
+/** Two ways out of an operation: over the original, or as a new file. */
+@Composable
+fun SaveRow(
+    saveLabel: String,
+    enabled: Boolean,
+    onSaveOver: () -> Unit,
+    onExport: () -> Unit,
+) {
+    Row(Modifier.fillMaxWidth()) {
+        Button(
+            onClick = onSaveOver,
+            enabled = enabled,
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink),
+            modifier = Modifier
+                .weight(1f)
+                .height(52.dp),
+        ) { Text(saveLabel, fontWeight = FontWeight.Bold, fontSize = 15.sp) }
+        Spacer(Modifier.width(10.dp))
+        OutlinedButton(
+            onClick = onExport,
+            enabled = enabled,
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.height(52.dp),
+        ) { Text("Save a copy", color = Accent, fontSize = 15.sp) }
+    }
+}

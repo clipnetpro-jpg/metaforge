@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.graphics.Bitmap
 import com.metaforge.ai.AiDetector
+import com.metaforge.ai.OnlineCheck
 import com.metaforge.ai.WatermarkRemover
 import com.metaforge.ai.DetectionResult
 import com.metaforge.ai.Evidence
@@ -65,6 +66,12 @@ fun DetectScreen(onBack: () -> Unit) {
     var scrubDetail by remember { mutableStateOf(false) }
     var cleaning by remember { mutableStateOf(false) }
     var cleanReport by remember { mutableStateOf<WatermarkRemover.Report?>(null) }
+    var markLayer by remember { mutableStateOf<ImageBitmap?>(null) }
+    var showMark by remember { mutableStateOf(true) }
+    var online by remember { mutableStateOf(OnlineCheck.load(context)) }
+    var onlineSheet by remember { mutableStateOf(false) }
+    var onlineOutcome by remember { mutableStateOf<OnlineCheck.Outcome?>(null) }
+    var onlineBusy by remember { mutableStateOf(false) }
 
     val pick = rememberFilePicker(IMAGE_ONLY) { uri ->
         busy = true
@@ -94,12 +101,11 @@ fun DetectScreen(onBack: () -> Unit) {
         busy = true
         message = null
         scope.launch {
-            val bitmap = withContext(Dispatchers.IO) {
-                BitmapFactory.decodeFile(s.workingCopy.absolutePath)
-            }
+            val loaded = withContext(Dispatchers.IO) { decodeWithinBudget(s.workingCopy.absolutePath) }
+            if (loaded.note != null) message = loaded.note
             val detector = AiDetector(et)
             runCatching {
-                detector.analyse(s.workingCopy, bitmap)
+                detector.analyse(s.workingCopy, loaded.bitmap, loaded.fullSize)
                     .flowOn(Dispatchers.IO)
                     .collect { progress = it }
             }.onFailure { message = it.message ?: "analysis failed" }
@@ -107,6 +113,8 @@ fun DetectScreen(onBack: () -> Unit) {
             removable = detector.lastRemovable
             cleanReport = null
             heatmap = result?.heatmap?.asImageBitmap()
+            markLayer = result?.markMap?.asImageBitmap()
+            onlineOutcome = null
             busy = false
         }
     }
@@ -117,11 +125,16 @@ fun DetectScreen(onBack: () -> Unit) {
         cleaning = true
         message = null
         scope.launch {
-            val bitmap = withContext(Dispatchers.IO) {
-                BitmapFactory.decodeFile(s.workingCopy.absolutePath)
-            }
+            val loaded = withContext(Dispatchers.IO) { decodeWithinBudget(s.workingCopy.absolutePath) }
+            val bitmap = loaded.bitmap
             if (bitmap == null) {
-                message = "this image could not be opened for cleaning"
+                message = "this image could not be opened"
+                busy = false; cleaning = false
+                return@launch
+            }
+            if (!loaded.fullSize) {
+                message = "this picture is too large to rewrite on this device, " +
+                    "so it was only checked, not changed"
                 busy = false; cleaning = false
                 return@launch
             }
@@ -158,6 +171,20 @@ fun DetectScreen(onBack: () -> Unit) {
             val r = withContext(Dispatchers.IO) { media.commit(s) }
             message = if (r.isSuccess) "saved into " + s.displayName
                       else r.exceptionOrNull()?.message ?: "the file could not be written"
+            busy = false
+        }
+    }
+
+    val exportCopy = rememberExportPicker(
+        suggestedName = copyName(staged?.displayName ?: "picture.jpg"),
+        mimeType = mimeForName(staged?.displayName ?: "picture.jpg"),
+    ) { destination ->
+        val s = staged ?: return@rememberExportPicker
+        busy = true
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { media.exportTo(s, destination) }
+            message = if (r.isSuccess) "a copy was saved where you chose"
+                      else r.exceptionOrNull()?.message ?: "the copy could not be written"
             busy = false
         }
     }
@@ -203,9 +230,9 @@ fun DetectScreen(onBack: () -> Unit) {
                     result?.let { r ->
                         EvidenceOverlay(
                             hotspots = r.hotspots,
-                            heatmap = heatmap,
+                            heatmap = if (showMark && markLayer != null) markLayer else heatmap,
                             modifier = Modifier.matchParentSize(),
-                            showHeatmap = showHeatmap,
+                            showHeatmap = showHeatmap || (showMark && markLayer != null),
                         )
                     }
                 }
@@ -242,6 +269,36 @@ fun DetectScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
                 r.evidence.forEach { EvidenceRow(it) }
 
+                if (markLayer != null) {
+                    Spacer(Modifier.height(8.dp))
+                    SwitchRow(
+                        "Show where the mark is",
+                        "Lights up every part of the picture that carries it, " +
+                            "${r.markCoverage}% of the frame",
+                        showMark,
+                    ) { showMark = it }
+                }
+
+                Spacer(Modifier.height(12.dp))
+                OnlineCard(
+                    settings = online,
+                    outcome = onlineOutcome,
+                    busy = onlineBusy,
+                    onConfigure = { onlineSheet = true },
+                    onRun = {
+                        val file = staged?.workingCopy
+                        if (file != null) {
+                            onlineBusy = true
+                            scope.launch {
+                                onlineOutcome = withContext(Dispatchers.IO) {
+                                    OnlineCheck.check(online, file)
+                                }
+                                onlineBusy = false
+                            }
+                        }
+                    },
+                )
+
                 if (removable) {
                     Spacer(Modifier.height(16.dp))
                     RemovalCard(
@@ -259,15 +316,32 @@ fun DetectScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 CleanedCard(report)
                 Spacer(Modifier.height(10.dp))
-                RunButton("Save the cleaned picture", !busy) { saveBack() }
+                SaveRow(
+                    saveLabel = "Save over the original",
+                    enabled = !busy,
+                    onSaveOver = { saveBack() },
+                    onExport = exportCopy,
+                )
             }
 
             message?.let {
                 Spacer(Modifier.height(12.dp))
-                InfoCard("Result", it, Bad)
+                InfoCard("Result", it, if (it.contains("could not")) Bad else Good)
             }
             Spacer(Modifier.height(28.dp))
         }
+    }
+
+    if (onlineSheet) {
+        OnlineSettingsSheet(
+            initial = online,
+            onDismiss = { onlineSheet = false },
+            onSave = {
+                OnlineCheck.save(context, it)
+                online = it
+                onlineSheet = false
+            },
+        )
     }
 }
 
@@ -502,7 +576,7 @@ private fun saveCleanedInto(
         if (isPng) {
             cleaned.compress(Bitmap.CompressFormat.PNG, 100, out)
         } else {
-            cleaned.compress(Bitmap.CompressFormat.JPEG, 97, out)
+            cleaned.compress(Bitmap.CompressFormat.JPEG, 100, out)
         }
     }
 
@@ -512,4 +586,185 @@ private fun saveCleanedInto(
         target.absolutePath,
     )
     keepMetadata.delete()
+}
+
+@Composable
+private fun OnlineCard(
+    settings: OnlineCheck.Settings,
+    outcome: OnlineCheck.Outcome?,
+    busy: Boolean,
+    onConfigure: () -> Unit,
+    onRun: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.05f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(18.dp)) {
+            Text("A second opinion", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (settings.configured) {
+                    "Sends this one picture to your own account at ${settings.provider.label} " +
+                        "and brings back their score. Nothing leaves the phone unless you tap it."
+                } else {
+                    "You can add your own detection account and compare its answer with what was " +
+                        "measured here. Nothing is sent anywhere until you set that up and ask for it."
+                },
+                color = Muted,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+            )
+            Spacer(Modifier.height(12.dp))
+            when (val o = outcome) {
+                is OnlineCheck.Outcome.Scored -> {
+                    Text(
+                        "${o.provider}: ${o.score} out of 100",
+                        color = if (o.score > 60) Warn else Good,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                    )
+                    Text(o.detail, color = Muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.height(10.dp))
+                }
+                is OnlineCheck.Outcome.Failed -> {
+                    Text(o.reason, color = Bad, fontSize = 13.sp)
+                    Spacer(Modifier.height(10.dp))
+                }
+                null -> Unit
+            }
+            Row {
+                Button(
+                    onClick = onRun,
+                    enabled = settings.configured && !busy,
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.weight(1f).height(46.dp),
+                ) { Text(if (busy) "Asking" else "Ask", fontWeight = FontWeight.Bold) }
+                Spacer(Modifier.width(10.dp))
+                OutlinedButton(
+                    onClick = onConfigure,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.height(46.dp),
+                ) { Text(if (settings.configured) "Change" else "Set up", color = Accent) }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun OnlineSettingsSheet(
+    initial: OnlineCheck.Settings,
+    onDismiss: () -> Unit,
+    onSave: (OnlineCheck.Settings) -> Unit,
+) {
+    var provider by remember { mutableStateOf(initial.provider) }
+    var user by remember { mutableStateOf(initial.user) }
+    var secret by remember { mutableStateOf(initial.secret) }
+    var endpoint by remember { mutableStateOf(initial.endpoint) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Panel) {
+        Column(
+            Modifier
+                .padding(20.dp)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            Text("Your detection account", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Text(
+                "The account is yours and the keys stay on this phone. Pictures go straight from " +
+                    "here to the service you choose.",
+                color = Muted,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+            )
+            Spacer(Modifier.height(14.dp))
+            Row {
+                OnlineCheck.Provider.entries.forEach { p ->
+                    FilterChip(
+                        selected = p == provider,
+                        onClick = { provider = p },
+                        label = { Text(p.label, fontSize = 12.sp) },
+                        modifier = Modifier.padding(end = 6.dp),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Accent.copy(alpha = 0.22f),
+                            selectedLabelColor = Accent,
+                            labelColor = Muted,
+                        ),
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            if (provider == OnlineCheck.Provider.CUSTOM) {
+                OutlinedTextField(
+                    value = endpoint,
+                    onValueChange = { endpoint = it },
+                    label = { Text("Address to post the picture to") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = fieldColors(),
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+            OutlinedTextField(
+                value = user,
+                onValueChange = { user = it },
+                label = { Text(if (provider == OnlineCheck.Provider.SIGHTENGINE) "API user" else "User (optional)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = fieldColors(),
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = secret,
+                onValueChange = { secret = it },
+                label = { Text(if (provider == OnlineCheck.Provider.SIGHTENGINE) "API secret" else "Secret (optional)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = fieldColors(),
+            )
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = { onSave(OnlineCheck.Settings(provider, user.trim(), secret.trim(), endpoint.trim())) },
+                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().height(50.dp),
+            ) { Text("Save", fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+private class Loaded(val bitmap: Bitmap?, val fullSize: Boolean, val note: String?)
+
+/**
+ * Opens a picture without risking the app on a huge one.
+ *
+ * Anything up to about forty megapixels is read whole. Beyond that the picture
+ * is opened smaller so the app stays responsive, and the search for a hidden
+ * mark switches to reading the file at full size in pieces instead, because a
+ * shrunk picture no longer carries one.
+ */
+private fun decodeWithinBudget(path: String): Loaded {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeFile(path, bounds)
+    val pixels = bounds.outWidth.toLong() * bounds.outHeight.toLong()
+    if (pixels <= 0) return Loaded(null, false, "this file is not a picture")
+
+    var sample = 1
+    while (pixels / (sample.toLong() * sample.toLong()) > 40_000_000L) sample *= 2
+
+    val options = android.graphics.BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    val bitmap = runCatching { android.graphics.BitmapFactory.decodeFile(path, options) }.getOrNull()
+    val note = if (sample > 1) {
+        "this picture is ${pixels / 1_000_000} megapixels, so the preview is smaller while the " +
+            "full picture is still searched"
+    } else {
+        null
+    }
+    return Loaded(bitmap, sample == 1, note)
 }

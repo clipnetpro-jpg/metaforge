@@ -95,6 +95,26 @@ class MediaAccess(private val context: Context) {
             doc.uri
         }
 
+    /** Writes the working copy to any destination the user picked. */
+    fun exportTo(staged: Staged, destination: Uri): Result<Unit> = runCatching {
+        context.contentResolver.openOutputStream(destination, "wt")!!.use { out ->
+            staged.workingCopy.inputStream().use { it.copyTo(out) }
+        }
+    }
+
+    /** Puts the untouched original back over the file, if a backup was kept. */
+    fun restore(staged: Staged): Result<Unit> = runCatching {
+        val backup = File(backupDir, "${staged.sha256.take(16)}_${staged.displayName}")
+        require(backup.exists()) { "no untouched copy was kept for this file" }
+        context.contentResolver.openOutputStream(staged.uri, "wt")!!.use { out ->
+            backup.inputStream().use { it.copyTo(out) }
+        }
+        backup.copyTo(staged.workingCopy, overwrite = true)
+    }
+
+    fun hasBackup(staged: Staged): Boolean =
+        File(backupDir, "${staged.sha256.take(16)}_${staged.displayName}").exists()
+
     fun cleanup(staged: Staged) {
         staged.workingCopy.delete()
     }

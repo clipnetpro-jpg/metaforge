@@ -99,6 +99,21 @@ fun InspectScreen(onBack: () -> Unit) {
 
     val pick = rememberFilePicker(IMAGE_AND_VIDEO) { open(it) }
 
+    val exportCopy = rememberExportPicker(
+        suggestedName = copyName(staged?.displayName ?: "file"),
+        mimeType = mimeForName(staged?.displayName ?: "file"),
+    ) { destination ->
+        val s = staged ?: return@rememberExportPicker
+        busy = true; busyLabel = "Saving a copy"
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { media.exportTo(s, destination) }
+            failed = r.isFailure
+            toast = if (r.isSuccess) "a copy was saved where you chose"
+                    else r.exceptionOrNull()?.message ?: "the copy could not be written"
+            busy = false
+        }
+    }
+
     fun runWrite(label: String, block: (MetadataRepository, java.io.File) -> MetadataRepository.WriteResult) {
         val s = staged ?: return
         val r = repo() ?: run { toast = "the engine is still starting"; failed = true; return }
@@ -249,6 +264,16 @@ fun InspectScreen(onBack: () -> Unit) {
                     }
                 }
                 item { Spacer(Modifier.height(24.dp)) }
+            }
+
+            if (staged != null) {
+                SaveRow(
+                    saveLabel = if (dirty) "Save changes" else "Saved",
+                    enabled = !busy,
+                    onSaveOver = { if (dirty) save() },
+                    onExport = exportCopy,
+                )
+                Spacer(Modifier.height(12.dp))
             }
         }
     }

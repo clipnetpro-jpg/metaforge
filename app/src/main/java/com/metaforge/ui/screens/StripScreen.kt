@@ -56,6 +56,20 @@ fun StripScreen(onBack: () -> Unit) {
         }
     }
 
+    val exportCopy = rememberExportPicker(
+        suggestedName = copyName(staged?.displayName ?: "file"),
+        mimeType = mimeForName(staged?.displayName ?: "file"),
+    ) { destination ->
+        val s = staged ?: return@rememberExportPicker
+        busy = true
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { media.exportTo(s, destination) }
+            message = if (r.isSuccess) "a copy was saved where you chose"
+                      else r.exceptionOrNull()?.message ?: "the copy could not be written"
+            busy = false
+        }
+    }
+
     fun run() {
         val s = staged ?: return
         val et = Engine.exifTool(context)
@@ -169,7 +183,12 @@ fun StripScreen(onBack: () -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(12.dp))
-                RunButton("Save the cleaned file", !busy) { save() }
+                SaveRow(
+                    saveLabel = "Save the cleaned file",
+                    enabled = !busy,
+                    onSaveOver = { save() },
+                    onExport = exportCopy,
+                )
             }
 
             message?.let {

@@ -46,6 +46,9 @@ object WatermarkScanner {
         val votesPerBit: Int,
         val region: RectF,
         val channel: Int,
+        val blockBits: ByteArray = ByteArray(0),
+        val gridCols: Int = 0,
+        val gridRows: Int = 0,
     ) {
         fun rotated(by: Int): Reading =
             copy(bits = IntArray(length) { bits[(it + by) % length] })
@@ -69,13 +72,26 @@ object WatermarkScanner {
         val payload: String?,
         val marks: List<Hotspot>,
         val removable: Boolean,
+        /** Where the mark reads, block by block, at the same shape as the picture. */
+        val coverage: Bitmap? = null,
+        val coveragePercent: Int = 0,
     )
 
-    fun scan(bitmap: Bitmap): Result {
+    fun scan(bitmap: Bitmap): Result = build(search(bitmap), lsbUniformity(bitmap))
+
+    /**
+     * For pictures too large to hold in memory. The file is read at full size in
+     * pieces, because shrinking it would wipe out the mark being looked for.
+     */
+    fun scanFile(path: String): Result = build(scanFileTiles(path), lsbFromFile(path))
+
+    private fun build(searchResult: Reading?, lsb: LsbReport): Result {
         val evidence = mutableListOf<Evidence>()
         val marks = mutableListOf<Hotspot>()
+        var coverage: Bitmap? = null
+        var coveragePercent = 0
 
-        val best = search(bitmap)
+        val best = searchResult
         var identified: String? = null
         var payload: String? = null
 
@@ -95,6 +111,9 @@ object WatermarkScanner {
                 if (agree >= KNOWN_AGREEMENT) {
                     identified = known.name
                     payload = best.rotated(rotation).asText()
+                    val map = coverageOf(best, known.bits, rotation)
+                    coverage = map.first
+                    coveragePercent = map.second
                     evidence += Evidence(
                         id = "watermark-known",
                         kind = EvidenceKind.PROVENANCE,
@@ -134,7 +153,6 @@ object WatermarkScanner {
             }
         }
 
-        val lsb = lsbUniformity(bitmap)
         if (lsb.score > 0.85f) {
             evidence += Evidence(
                 id = "lsb",
@@ -149,13 +167,50 @@ object WatermarkScanner {
             lsb.region?.let { marks += Hotspot(it, 0.7f, "hidden data", null) }
         }
 
+        if (identified != null) {
+            evidence += Evidence(
+                id = "watermark-spread",
+                kind = EvidenceKind.PROVENANCE,
+                title = "The mark covers the whole picture, not one corner",
+                explanation = "It is repeated in every small block of the frame, which is why " +
+                    "trimming or resaving does not shake it off. The overlay shows how strongly " +
+                    "each part of the picture carries it.",
+                weight = 0f,
+                measurement = "$coveragePercent% of the picture reads the mark",
+            )
+        }
+
         return Result(
             evidence = evidence,
             identified = identified,
             payload = payload,
             marks = marks,
             removable = identified != null || evidence.any { it.id == "watermark-unknown" || it.id == "lsb" },
+            coverage = coverage,
+            coveragePercent = coveragePercent,
         )
+    }
+
+    /**
+     * A picture of where the mark sits: one pixel per block, bright where that
+     * block's bit agrees with the recovered payload.
+     */
+    private fun coverageOf(reading: Reading, known: IntArray, rotation: Int): Pair<Bitmap?, Int> {
+        if (reading.gridCols <= 0 || reading.gridRows <= 0) return null to 0
+        val cols = reading.gridCols
+        val rows = reading.gridRows
+        val map = Bitmap.createBitmap(cols, rows, Bitmap.Config.ARGB_8888)
+        val px = IntArray(cols * rows)
+        var agreed = 0
+        for (i in 0 until minOf(px.size, reading.blockBits.size)) {
+            val expected = known[((i % reading.length) + rotation) % reading.length]
+            val hit = reading.blockBits[i].toInt() == expected
+            if (hit) agreed++
+            px[i] = if (hit) Color.argb(150, 34, 211, 238) else Color.argb(30, 120, 120, 140)
+        }
+        map.setPixels(px, 0, cols, 0, 0, cols, rows)
+        val percent = if (px.isEmpty()) 0 else agreed * 100 / px.size
+        return map to percent
     }
 
     // ------------------------------------------------------------------ search
@@ -163,24 +218,77 @@ object WatermarkScanner {
     /** Covers the whole frame, both channels, every grid alignment. */
     private fun search(bitmap: Bitmap): Reading? {
         var best: Reading? = null
-
-        for (tile in tiles(bitmap)) {
+        for (tile in tiles(bitmap.width, bitmap.height)) {
             val image = ChromaPlanes.read(bitmap, tile.left, tile.top, tile.width, tile.height) ?: continue
-            for (channel in 0..1) {
-                val plane = if (channel == 0) image.u else image.v
-                val ll = ChromaPlanes.approximation(plane)
-                // Alignment 0 first: an untouched image reads there. The other
-                // fifteen exist so a cropped copy is still found.
-                for (offset in ALIGNMENTS) {
-                    val readings = readAll(ll, offset.first, offset.second, tile.rect(bitmap), channel)
-                    for (r in readings) {
-                        if (best == null || r.strength > best!!.strength) best = r
-                    }
-                    if (best != null && best!!.strength >= 5.0) return best
-                }
-            }
+            best = better(best, analyseTile(image, tile.rect(bitmap.width, bitmap.height)))
+            if (best != null && best.strength >= 5.0) return best
         }
         return best
+    }
+
+    /**
+     * The same search over a file too large to hold in memory at once.
+     *
+     * Shrinking a picture would destroy the very mark being looked for, so the
+     * file is read at full size in pieces instead. This is what lets a forty
+     * megapixel photograph be checked properly on a phone.
+     */
+    fun scanFileTiles(path: String): Reading? {
+        val decoder = openRegionDecoder(path) ?: return null
+        var best: Reading? = null
+        try {
+            for (tile in tiles(decoder.width, decoder.height)) {
+                val rect = android.graphics.Rect(
+                    tile.left, tile.top, tile.left + tile.width, tile.top + tile.height,
+                )
+                val options = android.graphics.BitmapFactory.Options().apply {
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                val piece = runCatching { decoder.decodeRegion(rect, options) }.getOrNull() ?: continue
+                val image = ChromaPlanes.read(piece, 0, 0, piece.width, piece.height)
+                if (image != null) {
+                    best = better(
+                        best,
+                        analyseTile(image, tile.rect(decoder.width, decoder.height)),
+                    )
+                }
+                piece.recycle()
+                if (best != null && best.strength >= 5.0) return best
+            }
+        } finally {
+            runCatching { decoder.recycle() }
+        }
+        return best
+    }
+
+    @Suppress("DEPRECATION")
+    private fun openRegionDecoder(path: String): android.graphics.BitmapRegionDecoder? = runCatching {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            android.graphics.BitmapRegionDecoder.newInstance(path)
+        } else {
+            android.graphics.BitmapRegionDecoder.newInstance(path, false)
+        }
+    }.getOrNull()
+
+    private fun better(current: Reading?, candidates: List<Reading>): Reading? {
+        var best = current
+        for (r in candidates) if (best == null || r.strength > best.strength) best = r
+        return best
+    }
+
+    /** Every alignment and both colour channels of one piece of the picture. */
+    private fun analyseTile(image: ChromaPlanes.Image, region: RectF): List<Reading> {
+        val found = mutableListOf<Reading>()
+        for (channel in 0..1) {
+            val plane = if (channel == 0) image.u else image.v
+            val ll = ChromaPlanes.approximation(plane)
+            for (offset in ALIGNMENTS) {
+                val readings = readAll(ll, offset.first, offset.second, region, channel)
+                found += readings
+                if (readings.any { it.strength >= 5.0 }) return found
+            }
+        }
+        return found
     }
 
     private val ALIGNMENTS: List<Pair<Int, Int>> = buildList {
@@ -189,18 +297,16 @@ object WatermarkScanner {
     }
 
     private class Tile(val left: Int, val top: Int, val width: Int, val height: Int) {
-        fun rect(bitmap: Bitmap) = RectF(
-            left.toFloat() / bitmap.width,
-            top.toFloat() / bitmap.height,
-            (left + width).toFloat() / bitmap.width,
-            (top + height).toFloat() / bitmap.height,
+        fun rect(fullWidth: Int, fullHeight: Int) = RectF(
+            left.toFloat() / fullWidth,
+            top.toFloat() / fullHeight,
+            (left + width).toFloat() / fullWidth,
+            (top + height).toFloat() / fullHeight,
         )
     }
 
     /** Whole-image coverage in pieces small enough to stay quick. */
-    private fun tiles(bitmap: Bitmap): List<Tile> {
-        val w = bitmap.width
-        val h = bitmap.height
+    private fun tiles(w: Int, h: Int): List<Tile> {
         if (w <= MAX_TILE && h <= MAX_TILE) return listOf(Tile(0, 0, w, h))
         val out = mutableListOf<Tile>()
         var top = 0
@@ -284,6 +390,9 @@ object WatermarkScanner {
                 votesPerBit = slotTotal.min(),
                 region = region,
                 channel = channel,
+                blockBits = bits,
+                gridCols = cols,
+                gridRows = rows,
             )
         }
         return out
@@ -325,6 +434,41 @@ object WatermarkScanner {
             }
         }
         return if (!any) LsbReport(0f, null) else LsbReport(worst, worstRegion)
+    }
+
+    /** Samples full-size pieces of a large file rather than shrinking it. */
+    private fun lsbFromFile(path: String): LsbReport {
+        val decoder = openRegionDecoder(path) ?: return LsbReport(0f, null)
+        var worst = 0f
+        var worstRegion: RectF? = null
+        try {
+            val w = decoder.width
+            val h = decoder.height
+            val size = 512
+            for (ry in 0 until 3) {
+                for (rx in 0 until 3) {
+                    val left = ((w - size).coerceAtLeast(0) * rx) / 2
+                    val top = ((h - size).coerceAtLeast(0) * ry) / 2
+                    val rect = android.graphics.Rect(
+                        left, top, (left + size).coerceAtMost(w), (top + size).coerceAtMost(h),
+                    )
+                    if (rect.width() < 64 || rect.height() < 64) continue
+                    val piece = runCatching { decoder.decodeRegion(rect, null) }.getOrNull() ?: continue
+                    val score = lsbScore(piece, 0, 0, piece.width, piece.height)
+                    piece.recycle()
+                    if (score != null && score > worst) {
+                        worst = score
+                        worstRegion = RectF(
+                            rect.left.toFloat() / w, rect.top.toFloat() / h,
+                            rect.right.toFloat() / w, rect.bottom.toFloat() / h,
+                        )
+                    }
+                }
+            }
+        } finally {
+            runCatching { decoder.recycle() }
+        }
+        return LsbReport(worst, worstRegion)
     }
 
     private fun lsbScore(bitmap: Bitmap, left: Int, top: Int, w: Int, h: Int): Float? {

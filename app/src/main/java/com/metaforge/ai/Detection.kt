@@ -56,6 +56,9 @@ data class DetectionResult(
     val confidence: Int,
     val evidence: List<Evidence>,
     val heatmap: Bitmap? = null,
+    /** Block-by-block picture of where a hidden mark reads, if one was found. */
+    val markMap: Bitmap? = null,
+    val markCoverage: Int = 0,
     val hotspots: List<Hotspot> = emptyList(),
     val modelAccuracyNote: String,
     val elapsedMs: Long,

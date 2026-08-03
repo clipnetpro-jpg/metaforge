@@ -111,6 +111,21 @@ fun TransplantScreen(onBack: () -> Unit) {
         }
     }
 
+    val exportCopy = rememberExportPicker(
+        suggestedName = copyName(target?.displayName ?: "file"),
+        mimeType = mimeForName(target?.displayName ?: "file"),
+    ) { destination ->
+        val t = target ?: return@rememberExportPicker
+        busy = true; busyLabel = "Saving a copy"
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { media.exportTo(t, destination) }
+            failed = r.isFailure
+            toast = if (r.isSuccess) "a copy was saved where you chose"
+                    else r.exceptionOrNull()?.message ?: "the copy could not be written"
+            busy = false
+        }
+    }
+
     val pickSource = rememberFilePicker(IMAGE_AND_VIDEO) { load(it, true) }
     val pickTarget = rememberFilePicker(IMAGE_AND_VIDEO) { load(it, false) }
 
@@ -236,21 +251,18 @@ fun TransplantScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(10.dp))
                 AppliedCard(a)
                 Spacer(Modifier.height(8.dp))
-                Row {
-                    Button(
-                        onClick = { save() },
-                        enabled = !busy,
-                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.weight(1f).height(50.dp),
-                    ) { Text("Save into the file", fontWeight = FontWeight.Bold) }
-                    Spacer(Modifier.width(10.dp))
-                    OutlinedButton(
-                        onClick = { savingProfile = true },
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.height(50.dp),
-                    ) { Text("Keep as profile", color = Accent) }
-                }
+                SaveRow(
+                    saveLabel = "Save into the file",
+                    enabled = !busy,
+                    onSaveOver = { save() },
+                    onExport = exportCopy,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { savingProfile = true },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth().height(46.dp),
+                ) { Text("Keep this as a profile", color = Accent) }
             }
 
             if (rows.isNotEmpty() && applied == null) {

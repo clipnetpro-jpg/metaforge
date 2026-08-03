@@ -49,7 +49,16 @@ class AiDetector(private val exifTool: ExifTool) {
                 "messaging apps also move these numbers."
     }
 
-    fun analyse(file: File, bitmap: Bitmap?): Flow<OperationProgress> = progressFlow(
+    /**
+     * @param bitmapIsFullSize false when [bitmap] had to be shrunk to fit in
+     *        memory. A shrunk picture cannot carry a hidden mark, so in that
+     *        case the file itself is read at full size, piece by piece.
+     */
+    fun analyse(
+        file: File,
+        bitmap: Bitmap?,
+        bitmapIsFullSize: Boolean = true,
+    ): Flow<OperationProgress> = progressFlow(
         title = "Checking for AI generation",
         stages = stages,
     ) {
@@ -58,8 +67,10 @@ class AiDetector(private val exifTool: ExifTool) {
         val scan = stage("provenance") { ProvenanceScanner(exifTool).scan(file) }
         update("provenance", 1f, "${scan.tags.size} tags read")
 
-        val watermark = if (bitmap != null) {
+        val watermark = if (bitmap != null && bitmapIsFullSize) {
             stage("watermark") { WatermarkScanner.scan(bitmap) }
+        } else if (file.exists()) {
+            stage("watermark") { WatermarkScanner.scanFile(file.absolutePath) }
         } else {
             skip("watermark", "no image to read")
             WatermarkScanner.Result(emptyList(), null, null, emptyList(), false)
@@ -128,6 +139,8 @@ class AiDetector(private val exifTool: ExifTool) {
                 confidence = confidence,
                 evidence = evidence.sortedByDescending { kotlin.math.abs(it.weight) },
                 heatmap = forensics.heatmap,
+                markMap = watermark.coverage,
+                markCoverage = watermark.coveragePercent,
                 hotspots = watermark.marks +
                     if (verdict == Verdict.CONFIRMED_CAPTURE) emptyList() else forensics.hotspots,
                 modelAccuracyNote = note,
