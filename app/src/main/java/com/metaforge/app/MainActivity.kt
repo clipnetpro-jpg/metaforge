@@ -57,12 +57,12 @@ class MainActivity : ComponentActivity() {
         val stamp = BuildConfig.VERSION_NAME
         appendLine("MetaForge $stamp")
         appendLine()
-        val ok = PerlRuntime.ensureReady(this@MainActivity, stamp)
+        val ok = PerlRuntime.ensureReady(this@MainActivity)
         appendLine("Native lib dir : ${applicationInfo.nativeLibraryDir}")
         appendLine("Perl binary    : ${if (ok) "found" else "MISSING"}")
         if (!ok) return@buildString
         appendLine("Perl version   : ${PerlRuntime.runOnce("-e", "print \"\$^V on \$^O\"")}")
-        val et = ExifTool.get(this@MainActivity, stamp)
+        val et = ExifTool.get(this@MainActivity)
         if (et == null) {
             appendLine("ExifTool       : FAILED TO START")
             return@buildString

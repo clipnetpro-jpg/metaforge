@@ -17,23 +17,22 @@ import kotlinx.coroutines.flow.toList
 class EngineTest {
 
     private val ctx = InstrumentationRegistry.getInstrumentation().targetContext
-    private val stamp = "test"
 
     /** The engine, or a failure that carries the real Perl error with it. */
     private fun engine(): ExifTool =
-        ExifTool.get(ctx, stamp)
+        ExifTool.get(ctx)
             ?: throw AssertionError("engine unavailable\n" + ExifTool.lastStartupDiagnostics)
 
     @Test
     fun perlInterpreterRuns() {
-        assertTrue("runtime not ready", PerlRuntime.ensureReady(ctx, stamp))
+        assertTrue("runtime not ready", PerlRuntime.ensureReady(ctx))
         val out = PerlRuntime.runOnce("-e", "print 42 + 1")
         assertTrue("perl said: $out", out.contains("43"))
     }
 
     @Test
     fun perlCoreModulesLoad() {
-        assertTrue("runtime not ready", PerlRuntime.ensureReady(ctx, stamp))
+        assertTrue("runtime not ready", PerlRuntime.ensureReady(ctx))
         val out = PerlRuntime.runOnce(
             "-MPOSIX", "-MFcntl", "-MIO::File", "-MEncode", "-MList::Util",
             "-e", "print 'MODULES OK'",
@@ -47,7 +46,7 @@ class EngineTest {
 
     @Test
     fun exifToolScriptRunsOneShot() {
-        assertTrue(PerlRuntime.ensureReady(ctx, stamp))
+        assertTrue(PerlRuntime.ensureReady(ctx))
         val out = PerlRuntime.runOnce(PerlRuntime.exifToolScript.absolutePath, "-ver").trim()
         android.util.Log.i("ExifTool", "one-shot -ver output:\n$out")
         android.util.Log.i("PerlRuntime", PerlRuntime.describe())

@@ -227,6 +227,10 @@ class ExifTool private constructor(private val context: Context) {
 
         @Volatile private var instance: ExifTool? = null
 
+        /** Populated whenever [get] refuses to return an engine. */
+        @Volatile var lastDiagnostics: String = "engine never started"
+            private set
+
         /**
          * Why the last [get] returned null. Kept so callers can report the real
          * Perl error instead of a bare "engine did not start".
@@ -235,11 +239,11 @@ class ExifTool private constructor(private val context: Context) {
         var lastStartupDiagnostics: String = "engine has not been started yet"
             private set
 
-        fun get(context: Context, stamp: String): ExifTool? {
+        fun get(context: Context): ExifTool? {
             instance?.let { return it }
             synchronized(this) {
                 instance?.let { return it }
-                if (!PerlRuntime.ensureReady(context, stamp)) {
+                if (!PerlRuntime.ensureReady(context)) {
                     lastStartupDiagnostics = "runtime assets not ready\n" + PerlRuntime.describe()
                     return null
                 }

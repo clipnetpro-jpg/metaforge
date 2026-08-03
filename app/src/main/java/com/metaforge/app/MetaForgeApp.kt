@@ -33,13 +33,12 @@ class MetaForgeApp : Application() {
         instance = this
         scope.launch {
             val t0 = System.nanoTime()
-            val stamp = BuildConfig.VERSION_NAME
-            val ok = PerlRuntime.ensureReady(this@MetaForgeApp, stamp)
+            val ok = PerlRuntime.ensureReady(this@MetaForgeApp)
             if (!ok) {
                 engineStatus = "runtime unpack failed"
                 return@launch
             }
-            val et = ExifTool.get(this@MetaForgeApp, stamp)
+            val et = ExifTool.get(this@MetaForgeApp)
             warmupMs = (System.nanoTime() - t0) / 1_000_000
             engineReady = et != null
             engineStatus = when {

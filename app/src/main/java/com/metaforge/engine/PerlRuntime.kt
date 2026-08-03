@@ -33,7 +33,20 @@ object PerlRuntime {
     @Volatile private var ready = false
 
     @Synchronized
-    fun ensureReady(context: Context, stamp: String): Boolean {
+    /**
+     * The runtime version is derived from the app itself, never passed in.
+     * An earlier build let callers supply their own stamp, and two callers
+     * disagreeing caused the runtime directory to be deleted underneath a
+     * running ExifTool process.
+     */
+    private fun stampOf(context: Context): String =
+        runCatching {
+            val pi = context.packageManager.getPackageInfo(context.packageName, 0)
+            "${pi.versionName}-${pi.lastUpdateTime}"
+        }.getOrDefault("unknown")
+
+    fun ensureReady(context: Context): Boolean {
+        val stamp = stampOf(context)
         if (ready) return true
 
         perlBinary = File(context.applicationInfo.nativeLibraryDir, "libperl.so")
@@ -91,7 +104,7 @@ object PerlRuntime {
     }
 
     /** Runs perl once and returns stdout+stderr. Used for diagnostics only. */
-    fun runOnce(vararg args: String, timeoutMs: Long = 20_000): String {
+    fun runOnce(vararg args: String, timeoutMs: Long = 30_000): String {
         val cmd = mutableListOf(perlBinary.absolutePath)
         cmd += includeArgs()
         cmd += args
