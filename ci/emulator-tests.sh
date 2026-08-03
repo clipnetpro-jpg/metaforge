@@ -15,24 +15,29 @@ unzip -qo "$ASSETS/perl5-x86_64.zip" -d /tmp/mfprobe
 unzip -q  "$ASSETS/exiftool.zip"     -d /tmp/mfprobe
 cp app/src/main/jniLibs/x86_64/libperl.so /tmp/mfprobe/perl
 
+# One tarball, not ten thousand adb pushes: the Perl tree is 30 MB of tiny
+# files and pushing it file by file takes longer than the tests do.
+( cd /tmp/mfprobe && tar -czf /tmp/mfprobe.tgz perl perl5 exiftool )
 adb shell "rm -rf $PROBE; mkdir -p $PROBE"
-( cd /tmp/mfprobe && adb push perl perl5 exiftool "$PROBE/" >/dev/null 2>&1 )
-adb shell "chmod 0755 $PROBE/perl"
+timeout 300 adb push /tmp/mfprobe.tgz "$PROBE/probe.tgz" >/dev/null 2>&1
+timeout 300 adb shell "cd $PROBE && tar -xzf probe.tgz && rm probe.tgz && chmod 0755 perl"
 
 echo "--- interpreter ---"
-adb shell "$PROBE/perl -e 'print qq{PERL \$] on \$^O\n}'" 2>&1 | head -20
+timeout 120 adb shell "$PROBE/perl -e 'print qq{PERL \$] on \$^O\n}'" 2>&1 | head -20
 echo "--- core modules ---"
-adb shell "$PROBE/perl -I$PROBE/perl5 -MPOSIX -MFcntl -MIO::File -MEncode -e 'print qq{MODULES OK\n}'" 2>&1 | head -30
+timeout 120 adb shell "$PROBE/perl -I$PROBE/perl5 -MPOSIX -MFcntl -MIO::File -MEncode -e 'print qq{MODULES OK\n}'" 2>&1 | head -30
 echo "--- exiftool one-shot ---"
-adb shell "$PROBE/perl -I$PROBE/perl5 -I$PROBE/exiftool/lib $PROBE/exiftool/exiftool -ver" 2>&1 | head -40
+timeout 180 adb shell "$PROBE/perl -I$PROBE/perl5 -I$PROBE/exiftool/lib $PROBE/exiftool/exiftool -ver" 2>&1 | head -40
 echo "--- exiftool stay_open ---"
-adb shell "printf '%s\n' -ver -execute1 -stay_open False -execute2 | $PROBE/perl -I$PROBE/perl5 -I$PROBE/exiftool/lib $PROBE/exiftool/exiftool -stay_open True -@ -" 2>&1 | head -20
+timeout 180 adb shell "printf '%s\n' -ver -execute1 -stay_open False -execute2 | $PROBE/perl -I$PROBE/perl5 -I$PROBE/exiftool/lib $PROBE/exiftool/exiftool -stay_open True -@ -" 2>&1 | head -20
 echo "::endgroup::"
 
 adb logcat -c >/dev/null 2>&1
 
-gradle --no-daemon connectedDebugAndroidTest
+# Never let a wedged device hold the whole workflow open.
+timeout 1500 gradle --no-daemon connectedDebugAndroidTest
 rc=$?
+[ "$rc" = "124" ] && echo "::error::instrumentation timed out after 25 minutes"
 
 echo "::group::instrumentation results"
 for f in $(find app/build/outputs/androidTest-results -name '*.xml' 2>/dev/null); do

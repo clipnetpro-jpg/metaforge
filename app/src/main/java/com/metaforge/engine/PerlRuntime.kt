@@ -109,9 +109,21 @@ object PerlRuntime {
         cmd += includeArgs()
         cmd += args
         val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().readText()
-        p.waitFor()
-        return out.trim()
+        // The timeout was declared but never enforced, so a wedged interpreter
+        // could hang the caller, and did: it stalled CI for twenty minutes.
+        val out = StringBuilder()
+        val reader = Thread {
+            runCatching { out.append(p.inputStream.bufferedReader().readText()) }
+        }
+        reader.isDaemon = true
+        reader.start()
+        if (!p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            p.destroyForcibly()
+            reader.join(1_000)
+            return (out.toString() + "\n[timed out after ${timeoutMs} ms]").trim()
+        }
+        reader.join(2_000)
+        return out.toString().trim()
     }
 
     private fun unzipAsset(context: Context, assetName: String, target: File) {
