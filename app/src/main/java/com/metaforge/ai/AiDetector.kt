@@ -128,7 +128,7 @@ class AiDetector(private val exifTool: ExifTool) {
             val note = when {
                 verdict == Verdict.LIKELY_AUTHENTIC ->
                     "A full camera exposure record and natural pixel texture both point to a " +
-                        "real photograph. Only a signed credential could make this certain.",
+                        "real photograph. Only a signed credential could make this certain."
                 watermark.identified != null ->
                     "Read out of the pixels themselves. A watermark like this survives a metadata " +
                         "wipe, a crop and a screenshot, so this is the strongest kind of answer."
