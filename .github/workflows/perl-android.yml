@@ -148,6 +148,14 @@ jobs:
           # exactly what left ExifTool unable to load anything.
           cp -a ./lib/. "$OUT/perl5/"
 
+          # Each extension is staged by MakeMaker into its own blib/lib. In a
+          # cross build those copies never make it back into ./lib, which is
+          # why POSIX.pm, Fcntl.pm, IO.pm and Encode.pm were absent from every
+          # APK so far even though their object code was linked in.
+          find . -type d -path '*/blib/lib' -print0 | while IFS= read -r -d '' d; do
+            cp -a "$d/." "$OUT/perl5/"
+          done
+
           # Static interpreter: the .a archives are already inside libperl.so.
           find "$OUT/perl5" -name '*.a' -delete
           find "$OUT/perl5" -name '*.bs' -delete
@@ -168,7 +176,10 @@ jobs:
           done
           if [ -n "$MISSING" ]; then
             echo "::error::staged perl tree is missing:$MISSING"
-            ls "$OUT/perl5" | head -50
+            for m in $MISSING; do
+              echo "--- where $m actually lives ---"
+              find . -name "$(basename "$m")" -not -path './out/*' 2>/dev/null | head -3
+            done
             exit 1
           fi
           cp "$GITHUB_WORKSPACE/bionic-flags.txt" "$OUT/" 2>/dev/null || true
