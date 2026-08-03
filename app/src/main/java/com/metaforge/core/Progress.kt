@@ -92,6 +92,13 @@ class ProgressReporter(
 
     suspend fun finish() = emit(finished = true)
 
+    /** Ends the operation with a reason, whatever state the stages are in. */
+    suspend fun abort(why: String) {
+        val i = states.indexOfFirst { it.state == StageState.RUNNING }
+        if (i >= 0) states[i] = states[i].copy(state = StageState.FAILED, detail = why)
+        emit(finished = true, error = why)
+    }
+
     /** Runs [block] as a stage, marking it done or failed automatically. */
     suspend fun <T> stage(id: String, detail: String? = null, block: suspend () -> T): T {
         start(id, detail)
@@ -114,7 +121,12 @@ inline fun progressFlow(
     try {
         reporter.body()
         reporter.finish()
+    } catch (t: kotlinx.coroutines.CancellationException) {
+        throw t
     } catch (t: Throwable) {
-        if (t is kotlinx.coroutines.CancellationException) throw t
+        // A failure raised outside any stage block used to end the flow with no
+        // final snapshot at all, so the screen sat on a spinner forever. Always
+        // emit a finished frame carrying the reason.
+        reporter.abort(t.message ?: t::class.simpleName ?: "failed")
     }
 }

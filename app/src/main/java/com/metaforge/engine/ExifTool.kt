@@ -138,7 +138,29 @@ class ExifTool private constructor(private val context: Context) {
 
     // ---------------------------------------------------------------- one-shot
 
-    private fun oneShot(args: Array<out String>): Result {
+    private fun oneShot(args: Array<out String>, timeoutMs: Long = ONE_SHOT_TIMEOUT_MS): Result {
+        val raw = oneShotRaw(args, timeoutMs)
+        return Result(
+            String(raw.stdout, Charsets.UTF_8).trim(),
+            String(raw.stderr, Charsets.UTF_8).trim(),
+            raw.ok,
+        )
+    }
+
+    /** stdout as bytes, for `-b` output that is not text at all. */
+    class RawResult(val stdout: ByteArray, val stderr: ByteArray, val ok: Boolean)
+
+    /**
+     * Runs ExifTool once and returns its raw output.
+     *
+     * Both pipes are drained on their own threads. Reading stdout to EOF first
+     * and stderr afterwards deadlocks the moment ExifTool writes more than a
+     * pipe buffer of warnings, which a file with damaged maker notes does
+     * easily: the child blocks writing to stderr, stdout never closes, and the
+     * caller waits forever. The wait is also bounded, so a wedged interpreter
+     * fails the operation instead of freezing the screen.
+     */
+    fun oneShotRaw(args: Array<out String>, timeoutMs: Long = ONE_SHOT_TIMEOUT_MS): RawResult {
         val cmd = mutableListOf(PerlRuntime.perlBinary.absolutePath)
         cmd += PerlRuntime.includeArgs()
         cmd += PerlRuntime.exifToolScript.absolutePath
@@ -148,12 +170,38 @@ class ExifTool private constructor(private val context: Context) {
             pb.directory(context.filesDir)
             pb.environment()["HOME"] = context.filesDir.absolutePath
             pb.environment()["TMPDIR"] = context.cacheDir.absolutePath
+            pb.environment()["PERL5LIB"] = PerlRuntime.perlLib.absolutePath
             val p = pb.start()
-            val out = p.inputStream.bufferedReader().readText()
-            val err = p.errorStream.bufferedReader().readText()
-            p.waitFor()
-            Result(out.trim(), err.trim(), true)
-        }.getOrElse { Result("", it.message ?: "exec failed", false) }
+
+            val out = java.io.ByteArrayOutputStream()
+            val err = java.io.ByteArrayOutputStream()
+            val drainOut = drain(p.inputStream, out)
+            val drainErr = drain(p.errorStream, err)
+
+            val finished = p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            if (!finished) {
+                p.destroyForcibly()
+                drainOut.join(1_000)
+                drainErr.join(1_000)
+                return RawResult(
+                    out.toByteArray(),
+                    "timed out after $timeoutMs ms".toByteArray(),
+                    false,
+                )
+            }
+            drainOut.join(2_000)
+            drainErr.join(2_000)
+            RawResult(out.toByteArray(), err.toByteArray(), true)
+        }.getOrElse {
+            RawResult(ByteArray(0), (it.message ?: "exec failed").toByteArray(), false)
+        }
+    }
+
+    private fun drain(from: java.io.InputStream, into: java.io.ByteArrayOutputStream): Thread {
+        val t = Thread { runCatching { from.copyTo(into) } }
+        t.isDaemon = true
+        t.start()
+        return t
     }
 
     // ------------------------------------------------------------------ public
@@ -161,7 +209,10 @@ class ExifTool private constructor(private val context: Context) {
     fun execute(vararg args: String): Result = synchronized(lock) {
         daemon?.let { d ->
             if (d.alive) {
-                val r = runCatching { d.exec(args) }.getOrNull()
+                // Under a deadline. Only the start-up probe used to be bounded,
+                // so a daemon that stopped answering mid-session hung whichever
+                // screen asked it a question, with no way back.
+                val r = withDeadline(COMMAND_TIMEOUT_MS) { runCatching { d.exec(args) }.getOrNull() }
                 if (r != null && r.ok) return r
             }
             // Daemon died mid-session. Try once to bring it back, then give up
@@ -207,6 +258,17 @@ class ExifTool private constructor(private val context: Context) {
 
     fun version(): String = execute("-ver").stdout.trim()
 
+    /**
+     * Extracts a binary tag as bytes.
+     *
+     * Never routed through the daemon. The daemon speaks over a text reader,
+     * so a thumbnail or a maker-note blob came back re-encoded and no longer
+     * matched the bytes in the file, which made the hex view fiction. A
+     * one-shot run hands the bytes over untouched.
+     */
+    fun binary(tag: String, path: String): ByteArray =
+        oneShotRaw(arrayOf("-b", "-$tag", path)).stdout
+
     fun diagnose(): String = buildString {
         appendLine(PerlRuntime.describe())
         appendLine("mode      : $mode")
@@ -224,6 +286,10 @@ class ExifTool private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "ExifTool"
+
+        /** A single metadata command. Generous, but never unbounded. */
+        const val COMMAND_TIMEOUT_MS = 120_000L
+        const val ONE_SHOT_TIMEOUT_MS = 180_000L
 
         @Volatile private var instance: ExifTool? = null
 

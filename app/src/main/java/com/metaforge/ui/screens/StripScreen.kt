@@ -45,12 +45,17 @@ fun StripScreen(onBack: () -> Unit) {
     var report by remember { mutableStateOf<PrivacyStripper.Report?>(null) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var written by remember { mutableStateOf(false) }
+    var undoAvailable by remember { mutableStateOf(false) }
 
     val pick = rememberFilePicker(IMAGE_AND_VIDEO) { uri ->
         busy = true
         scope.launch {
             runCatching { withContext(Dispatchers.IO) { media.stage(uri) } }
-                .onSuccess { staged = it; report = null; progress = null; message = null }
+                .onSuccess {
+                    staged = it; report = null; progress = null; message = null
+                    written = false; undoAvailable = false
+                }
                 .onFailure { message = it.message ?: "could not open that file" }
             busy = false
         }
@@ -97,10 +102,30 @@ fun StripScreen(onBack: () -> Unit) {
         busy = true
         scope.launch {
             val r = withContext(Dispatchers.IO) { media.commit(s) }
+            if (r.isSuccess) {
+                written = true
+                undoAvailable = withContext(Dispatchers.IO) { media.hasBackup(s) }
+            }
             message = if (r.isSuccess) "clean file written back over ${s.displayName}"
                       else "could not save: ${r.exceptionOrNull()?.message}"
             busy = false
         }
+    }
+
+    fun undo() {
+        val s = staged ?: return
+        busy = true
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { media.restore(s) }
+            if (r.isSuccess) { written = false; undoAvailable = false; report = null; progress = null }
+            message = if (r.isSuccess) "${s.displayName} is back exactly as it was"
+                      else "could not undo: ${r.exceptionOrNull()?.message}"
+            busy = false
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { staged?.let { media.cleanup(it) } }
     }
 
     ScreenScaffold(
@@ -188,6 +213,16 @@ fun StripScreen(onBack: () -> Unit) {
                     enabled = !busy,
                     onSaveOver = { save() },
                     onExport = exportCopy,
+                )
+            }
+
+            if (written) {
+                Spacer(Modifier.height(12.dp))
+                UndoRow(
+                    fileName = staged?.displayName ?: "the file",
+                    hasBackup = undoAvailable,
+                    enabled = !busy,
+                    onRestore = { undo() },
                 )
             }
 

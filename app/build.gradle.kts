@@ -33,8 +33,10 @@ android {
 
     buildTypes {
         release {
-            // The APK is dominated by the Perl tree, not by dex, so shrinking buys
-            // little and risks stripping something ONNX or OpenCV reaches by name.
+            // Left off deliberately. The instrumentation suite runs against the
+            // debug build, so an R8 rule that breaks only in release would ship
+            // untested. With OpenCV and ONNX gone the dex is small anyway, so
+            // shrinking would buy little and risk a lot.
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
@@ -81,9 +83,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.navigation.compose)
-    implementation("androidx.documentfile:documentfile:1.0.1")
-    implementation(libs.opencv)
-    implementation(libs.onnxruntime)
+    implementation(libs.androidx.documentfile)
+    implementation(libs.androidx.security.crypto)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)

@@ -33,11 +33,15 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
     var formats by remember { mutableStateOf(0) }
     var formatList by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(true) }
+    var storageBytes by remember { mutableStateOf(0L) }
+
+    val media = remember { Engine.media(context) }
 
     fun refresh() {
         busy = true
         scope.launch {
             withContext(Dispatchers.IO) {
+                storageBytes = media.storageUsedBytes()
                 val engine = Engine.exifTool(context)
                 if (engine == null) {
                     ready = false
@@ -103,6 +107,54 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                             fontSize = 13.sp,
                         )
                     }
+                }
+            }
+
+            // The user is entitled to know how much of their phone this is
+            // using and to get it back in one tap, rather than discovering it
+            // in Android's app settings.
+            Spacer(Modifier.height(14.dp))
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.05f)),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(20.dp)) {
+                    Text("Space in use", color = Muted, fontSize = 12.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        humanSize(storageBytes),
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                    )
+                    Text(
+                        "Working copies of files you opened, plus undo copies of files " +
+                            "you saved over. Working copies clear themselves after six " +
+                            "hours, undo copies after seven days.",
+                        color = Muted,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                withContext(Dispatchers.IO) { media.clearAllStorage() }
+                                storageBytes = withContext(Dispatchers.IO) { media.storageUsedBytes() }
+                            }
+                        },
+                        enabled = !busy && storageBytes > 0,
+                    ) {
+                        Text("Clear it now", color = Accent)
+                    }
+                    Text(
+                        "Clearing also discards every undo copy, so anything you saved " +
+                            "over can no longer be put back.",
+                        color = Muted,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                    )
                 }
             }
 

@@ -98,11 +98,15 @@ class MetadataRepository(private val exifTool: ExifTool) {
         return Document(ordered, tags.size, (System.nanoTime() - t0) / 1_000_000, null)
     }
 
-    /** The bytes behind a binary tag, for the hex view. */
+    /**
+     * The bytes behind a binary tag, for the hex view.
+     *
+     * Goes through the byte-level path, not the daemon. The daemon returns text
+     * decoded as UTF-8, so a thumbnail or a maker-note blob came back mangled
+     * and the hex view showed bytes that were never in the file.
+     */
     fun binary(file: File, qualified: String, limit: Int = 4096): ByteArray {
-        val res = exifTool.execute("-b", "-$qualified", file.absolutePath)
-        if (!res.ok) return ByteArray(0)
-        val bytes = res.stdout.toByteArray(Charsets.ISO_8859_1)
+        val bytes = exifTool.binary(qualified, file.absolutePath)
         return if (bytes.size > limit) bytes.copyOf(limit) else bytes
     }
 

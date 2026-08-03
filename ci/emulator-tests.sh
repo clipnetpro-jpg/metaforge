@@ -35,7 +35,7 @@ echo "::endgroup::"
 adb logcat -c >/dev/null 2>&1
 
 # Never let a wedged device hold the whole workflow open.
-timeout 1500 gradle --no-daemon connectedDebugAndroidTest
+timeout 1500 ./gradlew --no-daemon connectedDebugAndroidTest
 rc=$?
 [ "$rc" = "124" ] && echo "::error::instrumentation timed out after 25 minutes"
 

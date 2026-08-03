@@ -17,12 +17,28 @@ import java.io.RandomAccessFile
  */
 object ContainerCopier {
 
-    data class Block(val kind: String, val id: String, val bytes: ByteArray) {
-        override fun equals(other: Any?) = other is Block && kind == other.kind && id == other.id
-        override fun hashCode() = 31 * kind.hashCode() + id.hashCode()
-    }
-
     data class Result(val copied: List<String>, val skipped: List<String>, val error: String? = null)
+
+    /**
+     * Skips exactly [n] bytes or fails loudly.
+     *
+     * InputStream.skip is allowed to skip fewer bytes than asked and every call
+     * here ignored that. When it happened the copy resumed mid-segment and
+     * wrote a file that no decoder would open, which is the worst possible
+     * outcome for a tool people point at their own photographs.
+     */
+    private fun java.io.InputStream.skipExactly(n: Long) {
+        var left = n
+        val scratch = ByteArray(64 * 1024)
+        while (left > 0) {
+            val skipped = skip(left)
+            if (skipped > 0) { left -= skipped; continue }
+            val want = minOf(left, scratch.size.toLong()).toInt()
+            val read = read(scratch, 0, want)
+            if (read <= 0) error("file ended $left bytes before it should have")
+            left -= read
+        }
+    }
 
     fun copy(source: File, target: File): Result = runCatching {
         when (sniff(source)) {
@@ -78,7 +94,7 @@ object ContainerCopier {
             }
             // Everything from the first non-APP marker onward is the image itself.
             target.inputStream().use { input ->
-                input.skip(jpegHeaderLength(target).toLong())
+                input.skipExactly(jpegHeaderLength(target).toLong())
                 input.copyTo(o)
             }
         }
@@ -126,7 +142,7 @@ object ContainerCopier {
     private fun jpegHeaderLength(f: File): Int {
         var pos = 2
         f.inputStream().buffered().use { s ->
-            s.skip(2)
+            s.skipExactly(2)
             while (true) {
                 var b = s.read()
                 if (b == -1) return pos
@@ -137,7 +153,7 @@ object ContainerCopier {
                 if (marker !in 0xE0..0xEF) return pos
                 val hi = s.read(); val lo = s.read()
                 val len = (hi shl 8) or lo
-                s.skip((len - 2).toLong())
+                s.skipExactly((len - 2).toLong())
                 pos += 2 + len
             }
         }
@@ -177,7 +193,7 @@ object ContainerCopier {
     private fun readPngChunks(f: File): List<Pair<String, ByteArray>> {
         val out = mutableListOf<Pair<String, ByteArray>>()
         f.inputStream().buffered().use { s ->
-            s.skip(8)
+            s.skipExactly(8)
             while (true) {
                 val lenB = ByteArray(4)
                 if (s.read(lenB) != 4) break
@@ -189,7 +205,7 @@ object ContainerCopier {
                 val data = ByteArray(len)
                 var read = 0
                 while (read < len) { val n = s.read(data, read, len - read); if (n <= 0) break; read += n }
-                s.skip(4) // CRC
+                s.skipExactly(4) // CRC
                 out += type to data
                 if (type == "IEND") break
             }
@@ -218,11 +234,20 @@ object ContainerCopier {
      * rewriting, so the media payload is bit-identical afterwards.
      */
     private fun copyIsoBmff(source: File, target: File): Result {
-        val srcBoxes = readTopLevelBoxes(source).filter { it.first == "uuid" || it.first == "meta" }
-        if (srcBoxes.isEmpty()) return Result(emptyList(), listOf("no uuid/meta boxes in source"))
+        // Only `uuid`. Appending a second top-level `meta` box produces a file
+        // with two of them, which is not valid ISO-BMFF and which some players
+        // reject outright, so a `meta` box is reported as skipped instead of
+        // being copied into a broken result.
+        val all = readTopLevelBoxes(source)
+        val srcBoxes = all.filter { it.first == "uuid" }
+        val notes = mutableListOf<String>()
+        if (all.any { it.first == "meta" }) {
+            notes += "source meta box left behind: appending a second one would break the file"
+        }
+        if (srcBoxes.isEmpty()) return Result(emptyList(), notes + "no uuid boxes in source")
         val dstTypes = readTopLevelBoxes(target).map { it.first to it.third }.toSet()
         val missing = srcBoxes.filter { (t, _, size) -> (t to size) !in dstTypes }
-        if (missing.isEmpty()) return Result(emptyList(), listOf("no extra boxes to carry"))
+        if (missing.isEmpty()) return Result(emptyList(), notes + "no extra boxes to carry")
 
         RandomAccessFile(source, "r").use { input ->
             java.io.FileOutputStream(target, true).use { o ->
@@ -238,7 +263,7 @@ object ContainerCopier {
                 }
             }
         }
-        return Result(missing.map { "MP4 ${it.first} (${it.third} bytes)" }, emptyList())
+        return Result(missing.map { "MP4 ${it.first} (${it.third} bytes)" }, notes)
     }
 
     /** (type, fileOffset, totalSize) for every top-level box. */
@@ -298,7 +323,7 @@ object ContainerCopier {
                 o.write(body)
             }
             file.inputStream().use { input ->
-                input.skip(jpegHeaderLength(file).toLong())
+                input.skipExactly(jpegHeaderLength(file).toLong())
                 input.copyTo(o)
             }
         }

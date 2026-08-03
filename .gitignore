@@ -1,0 +1,22 @@
+# Build output
+build/
+.gradle/
+local.properties
+*.apk
+*.aab
+*.iml
+.idea/
+.DS_Store
+
+# Produced by CI, never committed: the Perl interpreter and the staged
+# Perl/ExifTool trees are assembled fresh by "02 - Build APK".
+app/src/main/jniLibs/
+app/src/main/assets/perl5.zip
+app/src/main/assets/perl5-*.zip
+app/src/main/assets/exiftool.zip
+app/src/main/assets/exiftool.version
+
+# Signing material must only ever exist as a repository secret.
+*.p12
+*.jks
+*.keystore

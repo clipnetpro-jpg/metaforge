@@ -32,6 +32,10 @@ class MetaForgeApp : Application() {
         super.onCreate()
         instance = this
         scope.launch {
+            // Anything a previous session left in the cache goes first, so the
+            // app does not sit on gigabytes of working copies of files the user
+            // finished with days ago.
+            runCatching { com.metaforge.data.MediaAccess(this@MetaForgeApp).sweep() }
             val t0 = System.nanoTime()
             val ok = PerlRuntime.ensureReady(this@MetaForgeApp)
             if (!ok) {

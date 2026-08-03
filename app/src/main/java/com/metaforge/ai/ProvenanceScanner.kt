@@ -117,9 +117,17 @@ class ProvenanceScanner(private val exifTool: ExifTool) {
         }
 
         // --- generator name in any tag ---------------------------------------
-        val hit = lower.entries.firstNotNullOfOrNull { (k, v) ->
-            generators.firstOrNull { (needle, _) -> v.contains(needle) }?.let { (_, name) -> Triple(k, name, tags[k]!!) }
-        }
+        // Only tags that came out of the file are evidence. ExifTool also
+        // reports the path and the file name, and matching those turned
+        // "imagen_001.jpg" (Spanish for "image") into a confirmed Google Imagen
+        // result at 99% confidence, and any folder called reflux into FLUX.
+        // Whole-word matching stops the rest of that family of mistakes.
+        val hit = lower.entries
+            .filterNot { (k, _) -> isFileSystemTag(k) }
+            .firstNotNullOfOrNull { (k, v) ->
+                generators.firstOrNull { (needle, _) -> containsWord(v, needle) }
+                    ?.let { (_, name) -> Triple(k, name, tags[k]!!) }
+            }
         if (hit != null) {
             val (key, name, raw) = hit
             found += Evidence(
@@ -181,6 +189,32 @@ class ProvenanceScanner(private val exifTool: ExifTool) {
         }
 
         return Scan(found, tags)
+    }
+
+    /** Tags describing where the file sits, not what is inside it. */
+    private fun isFileSystemTag(key: String): Boolean {
+        val group = key.substringBefore(':', "")
+        if (group.equals("File", true) || group.equals("System", true)) return true
+        val name = key.substringAfterLast(':')
+        return name.equals("SourceFile", true) || name.equals("Directory", true) ||
+            name.equals("FileName", true)
+    }
+
+    /**
+     * True when [needle] appears in [haystack] as a word rather than as a run
+     * of letters inside a longer one. "flux" must not match "reflux".
+     */
+    private fun containsWord(haystack: String, needle: String): Boolean {
+        var from = 0
+        while (true) {
+            val i = haystack.indexOf(needle, from)
+            if (i < 0) return false
+            val before = if (i == 0) ' ' else haystack[i - 1]
+            val afterIndex = i + needle.length
+            val after = if (afterIndex >= haystack.length) ' ' else haystack[afterIndex]
+            if (!before.isLetterOrDigit() && !after.isLetterOrDigit()) return true
+            from = i + 1
+        }
     }
 
     private fun readTags(file: File): Map<String, String> {

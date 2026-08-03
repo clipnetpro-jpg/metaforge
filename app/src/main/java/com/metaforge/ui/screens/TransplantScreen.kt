@@ -66,6 +66,8 @@ fun TransplantScreen(onBack: () -> Unit) {
     var applied by remember { mutableStateOf<Applied?>(null) }
     var editing by remember { mutableStateOf<DiffEntry?>(null) }
     var savingProfile by remember { mutableStateOf(false) }
+    var written by remember { mutableStateOf(false) }
+    var undoAvailable by remember { mutableStateOf(false) }
 
     fun repo(): MetadataRepository? = Engine.exifTool(context)?.let { MetadataRepository(it) }
 
@@ -104,7 +106,11 @@ fun TransplantScreen(onBack: () -> Unit) {
                 val staged = withContext(Dispatchers.IO) { media.stage(uri) }
                 val r = repo()
                 val d = if (r == null) null else withContext(Dispatchers.IO) { r.read(staged.workingCopy) }
-                if (asSource) { source = staged; sourceDoc = d } else { target = staged; targetDoc = d }
+                if (asSource) {
+                    source = staged; sourceDoc = d
+                } else {
+                    target = staged; targetDoc = d; written = false; undoAvailable = false
+                }
                 rebuild()
             }.onFailure { toast = it.message ?: "that file could not be opened"; failed = true }
             busy = false
@@ -196,9 +202,38 @@ fun TransplantScreen(onBack: () -> Unit) {
         scope.launch {
             val r = withContext(Dispatchers.IO) { media.commit(t) }
             failed = r.isFailure
+            if (r.isSuccess) {
+                written = true
+                undoAvailable = withContext(Dispatchers.IO) { media.hasBackup(t) }
+            }
             toast = if (r.isSuccess) "saved into ${t.displayName}"
                     else r.exceptionOrNull()?.message ?: "the file could not be written"
             busy = false
+        }
+    }
+
+    fun undo() {
+        val t = target ?: return
+        busy = true; busyLabel = "Putting the original back"
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { media.restore(t) }
+            failed = r.isFailure
+            if (r.isSuccess) {
+                written = false; undoAvailable = false; applied = null
+                val rep = repo()
+                if (rep != null) targetDoc = withContext(Dispatchers.IO) { rep.read(t.workingCopy) }
+                rebuild()
+            }
+            toast = if (r.isSuccess) "${t.displayName} is back exactly as it was"
+                    else r.exceptionOrNull()?.message ?: "could not undo"
+            busy = false
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            source?.let { media.cleanup(it) }
+            target?.let { media.cleanup(it) }
         }
     }
 
@@ -257,6 +292,15 @@ fun TransplantScreen(onBack: () -> Unit) {
                     onSaveOver = { save() },
                     onExport = exportCopy,
                 )
+                if (written) {
+                    Spacer(Modifier.height(12.dp))
+                    UndoRow(
+                        fileName = target?.displayName ?: "the file",
+                        hasBackup = undoAvailable,
+                        enabled = !busy,
+                        onRestore = { undo() },
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = { savingProfile = true },

@@ -97,8 +97,6 @@ jobs:
           java-version: '17'
 
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
 
       - name: Decode signing keystore
         id: signing
@@ -120,7 +118,7 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.MF_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.MF_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.MF_KEYSTORE_PASSWORD }}
-        run: gradle --no-daemon assembleDebug assembleRelease
+        run: ./gradlew --no-daemon assembleDebug assembleRelease
 
       - name: Collect APKs
         run: |
@@ -142,25 +140,6 @@ jobs:
           name: MetaForge-APK
           path: dist/*.apk
           retention-days: 90
-
-      - name: Publish release
-        if: inputs.publish_release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG="v0.1.${GITHUB_RUN_NUMBER}"
-          NOTES=$(printf '%s\n' \
-            "MetaForge build ${GITHUB_RUN_NUMBER}" \
-            "" \
-            "Install **MetaForge-${GITHUB_RUN_NUMBER}-arm64.apk**. That is the right" \
-            "file for essentially every phone made in the last decade." \
-            "" \
-            "If it refuses to install, use MetaForge-${GITHUB_RUN_NUMBER}-universal.apk," \
-            "which carries all three CPU builds and is twice the size." \
-            "" \
-            "ExifTool ${EXIFTOOL_VERSION} and Perl 5.38.2 run natively on the device.")
-          gh release create "$TAG" dist/*.apk --title "MetaForge $TAG" --notes "$NOTES" --latest
 
       - name: Enable KVM
         if: inputs.run_emulator_test
@@ -193,3 +172,33 @@ jobs:
           name: engine-test-report
           path: app/build/reports/androidTests/**
           retention-days: 30
+
+      - name: Publish release
+        # Only after the engine tests have actually passed on a device. This
+        # used to run before them, so a build with a dead ExifTool was already
+        # tagged and downloadable by the time the tests said it was broken.
+        if: inputs.publish_release && success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v0.1.${GITHUB_RUN_NUMBER}"
+          NOTES=$(printf '%s\n' \
+            "MetaForge build ${GITHUB_RUN_NUMBER}" \
+            "" \
+            "Install **MetaForge-${GITHUB_RUN_NUMBER}-arm64.apk**. That is the right" \
+            "file for essentially every phone made in the last decade." \
+            "" \
+            "If it refuses to install, use MetaForge-${GITHUB_RUN_NUMBER}-universal.apk," \
+            "which carries all three CPU builds and is twice the size." \
+            "" \
+            "ExifTool ${EXIFTOOL_VERSION} and Perl 5.38.2 run natively on the device." \
+            "" \
+            "Engine tests passed on an Android emulator before this was published.")
+          # Re-running a workflow reuses the run number, and creating a tag that
+          # already exists fails the whole job. Replace it instead.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
+          gh release create "$TAG" dist/*.apk --title "MetaForge $TAG" --notes "$NOTES" --latest
+

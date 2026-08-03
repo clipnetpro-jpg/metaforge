@@ -20,7 +20,8 @@ import org.json.JSONObject
  */
 object OnlineCheck {
 
-    private const val PREFS = "metaforge_online"
+    private const val PREFS = "metaforge_online_v2"
+    private const val LEGACY_PREFS = "metaforge_online"
     private const val KEY_PROVIDER = "provider"
     private const val KEY_USER = "user"
     private const val KEY_SECRET = "secret"
@@ -44,8 +45,46 @@ object OnlineCheck {
             }
     }
 
+    /**
+     * The credential store.
+     *
+     * These are the user's own API keys for someone else's paid service, and
+     * they used to sit in a plain SharedPreferences file. Now they are held
+     * under a key in the Android keystore. If the keystore is unavailable on a
+     * device the plain file is used rather than losing the feature, but that is
+     * the fallback, not the normal path.
+     */
+    private fun prefs(context: Context): android.content.SharedPreferences = runCatching {
+        val master = androidx.security.crypto.MasterKey.Builder(context)
+            .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        androidx.security.crypto.EncryptedSharedPreferences.create(
+            context,
+            PREFS,
+            master,
+            androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }.getOrElse {
+        android.util.Log.w("OnlineCheck", "keystore unavailable, falling back: ${it.message}")
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    }
+
+    /** Moves anything an older build left in the clear, then deletes it. */
+    private fun migrateLegacy(context: Context) {
+        val legacy = context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
+        if (legacy.all.isEmpty()) return
+        runCatching {
+            val target = prefs(context).edit()
+            legacy.all.forEach { (k, v) -> if (v is String) target.putString(k, v) }
+            target.apply()
+        }
+        legacy.edit().clear().apply()
+    }
+
     fun load(context: Context): Settings {
-        val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        migrateLegacy(context)
+        val p = prefs(context)
         return Settings(
             provider = Provider.entries
                 .firstOrNull { it.id == p.getString(KEY_PROVIDER, Provider.SIGHTENGINE.id) }
@@ -57,7 +96,7 @@ object OnlineCheck {
     }
 
     fun save(context: Context, settings: Settings) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        prefs(context).edit()
             .putString(KEY_PROVIDER, settings.provider.id)
             .putString(KEY_USER, settings.user)
             .putString(KEY_SECRET, settings.secret)
@@ -66,7 +105,8 @@ object OnlineCheck {
     }
 
     fun clear(context: Context) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+        prefs(context).edit().clear().apply()
+        context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE).edit().clear().apply()
     }
 
     sealed interface Outcome {

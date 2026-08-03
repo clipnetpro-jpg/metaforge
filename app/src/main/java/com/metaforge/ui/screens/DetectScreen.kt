@@ -72,6 +72,8 @@ fun DetectScreen(onBack: () -> Unit) {
     var onlineSheet by remember { mutableStateOf(false) }
     var onlineOutcome by remember { mutableStateOf<OnlineCheck.Outcome?>(null) }
     var onlineBusy by remember { mutableStateOf(false) }
+    var written by remember { mutableStateOf(false) }
+    var undoAvailable by remember { mutableStateOf(false) }
 
     val pick = rememberFilePicker(IMAGE_ONLY) { uri ->
         busy = true
@@ -82,6 +84,8 @@ fun DetectScreen(onBack: () -> Unit) {
             runCatching {
                 val s = withContext(Dispatchers.IO) { media.stage(uri) }
                 staged = s
+                written = false
+                undoAvailable = false
                 preview = withContext(Dispatchers.IO) {
                     val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
                     BitmapFactory.decodeFile(s.workingCopy.absolutePath, opts)?.asImageBitmap()
@@ -169,10 +173,37 @@ fun DetectScreen(onBack: () -> Unit) {
         busy = true
         scope.launch {
             val r = withContext(Dispatchers.IO) { media.commit(s) }
+            if (r.isSuccess) {
+                written = true
+                undoAvailable = withContext(Dispatchers.IO) { media.hasBackup(s) }
+            }
             message = if (r.isSuccess) "saved into " + s.displayName
                       else r.exceptionOrNull()?.message ?: "the file could not be written"
             busy = false
         }
+    }
+
+    fun undo() {
+        val s = staged ?: return
+        busy = true
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { media.restore(s) }
+            if (r.isSuccess) {
+                written = false; undoAvailable = false
+                result = null; heatmap = null; markLayer = null; cleanReport = null
+                preview = withContext(Dispatchers.IO) {
+                    val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+                    BitmapFactory.decodeFile(s.workingCopy.absolutePath, opts)?.asImageBitmap()
+                }
+            }
+            message = if (r.isSuccess) s.displayName + " is back exactly as it was"
+                      else r.exceptionOrNull()?.message ?: "could not undo"
+            busy = false
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { staged?.let { media.cleanup(it) } }
     }
 
     val exportCopy = rememberExportPicker(
@@ -321,6 +352,16 @@ fun DetectScreen(onBack: () -> Unit) {
                     enabled = !busy,
                     onSaveOver = { saveBack() },
                     onExport = exportCopy,
+                )
+            }
+
+            if (written) {
+                Spacer(Modifier.height(12.dp))
+                UndoRow(
+                    fileName = staged?.displayName ?: "the picture",
+                    hasBackup = undoAvailable,
+                    enabled = !busy,
+                    onRestore = { undo() },
                 )
             }
 
@@ -746,14 +787,21 @@ private class Loaded(val bitmap: Bitmap?, val fullSize: Boolean, val note: Strin
  * mark switches to reading the file at full size in pieces instead, because a
  * shrunk picture no longer carries one.
  */
+/** 16 MP of ARGB_8888 is 64 MB: large enough to look at, small enough to survive. */
+private const val MAX_IN_MEMORY_PIXELS = 16_000_000L
+
 private fun decodeWithinBudget(path: String): Loaded {
     val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
     android.graphics.BitmapFactory.decodeFile(path, bounds)
     val pixels = bounds.outWidth.toLong() * bounds.outHeight.toLong()
     if (pixels <= 0) return Loaded(null, false, "this file is not a picture")
 
+    // 40 megapixels of ARGB_8888 is a 160 MB allocation. largeHeap or not,
+    // that is an out-of-memory kill on most mid-range phones, and it bought
+    // nothing: when the picture is downsampled the watermark search already
+    // falls back to reading the file at full size in tiles.
     var sample = 1
-    while (pixels / (sample.toLong() * sample.toLong()) > 40_000_000L) sample *= 2
+    while (pixels / (sample.toLong() * sample.toLong()) > MAX_IN_MEMORY_PIXELS) sample *= 2
 
     val options = android.graphics.BitmapFactory.Options().apply {
         inSampleSize = sample

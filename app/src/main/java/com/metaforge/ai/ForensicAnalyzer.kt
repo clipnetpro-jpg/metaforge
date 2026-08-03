@@ -58,6 +58,8 @@ object ForensicAnalyzer {
         val ela = errorLevels(bmp, pixels, w, h)
         val noise = noiseResidual(luma, w, h)
         val detail = localDetail(luma, w, h)
+        // The downscaled copy is ours; the caller still owns [source].
+        if (bmp !== source) bmp.recycle()
 
         val cols = w / BLOCK
         val rows = h / BLOCK
@@ -117,10 +119,14 @@ object ForensicAnalyzer {
         )
 
         // --- heatmap and hotspots ---------------------------------------------
+        val elaRange = ela?.let { rangeOf(it.values) }
+        val noiseRange = rangeOf(noise.values)
+        val detailRange = rangeOf(detail.values)
         val combined = FloatArray(cols * rows) { i ->
-            val e = ela?.values?.getOrNull(i)?.let { norm(it, ela.values) } ?: 0f
-            val n = 1f - norm(noise.values[i], noise.values)
-            val d = 1f - norm(detail.values[i], detail.values)
+            val e = if (ela == null || elaRange == null) 0f
+                    else ela.values.getOrNull(i)?.let { norm(it, elaRange) } ?: 0f
+            val n = 1f - norm(noise.values[i], noiseRange)
+            val d = 1f - norm(detail.values[i], detailRange)
             (0.45f * e + 0.35f * n + 0.20f * d).coerceIn(0f, 1f)
         }
         val heatmap = heatmapOf(combined, cols, rows)
@@ -145,12 +151,26 @@ object ForensicAnalyzer {
         return Stats(mean, sqrt(acc / v.size).toFloat())
     }
 
-    private fun norm(value: Float, all: FloatArray): Float {
+    /**
+     * Maps one value onto 0..1 given the range of its grid.
+     *
+     * The range is computed once by [rangeOf] and passed in. It used to be
+     * recomputed for every single block, which turned building the heatmap into
+     * a quadratic walk: about fifty million float comparisons on a large photo,
+     * for a number that never changes.
+     */
+    private class Range(val lo: Float, val hi: Float)
+
+    private fun rangeOf(all: FloatArray): Range {
         var lo = Float.MAX_VALUE
         var hi = -Float.MAX_VALUE
         for (x in all) { lo = min(lo, x); hi = max(hi, x) }
-        return if (hi - lo < 1e-4f) 0f else ((value - lo) / (hi - lo)).coerceIn(0f, 1f)
+        return Range(lo, hi)
     }
+
+    private fun norm(value: Float, range: Range): Float =
+        if (range.hi - range.lo < 1e-4f) 0f
+        else ((value - range.lo) / (range.hi - range.lo)).coerceIn(0f, 1f)
 
     /** Mean absolute change per block after a JPEG round trip. */
     private fun errorLevels(bmp: Bitmap, pixels: IntArray, w: Int, h: Int): Grid? {

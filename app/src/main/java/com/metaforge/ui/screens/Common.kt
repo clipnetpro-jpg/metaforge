@@ -242,3 +242,55 @@ fun SaveRow(
         ) { Text("Save a copy", color = Accent, fontSize = 15.sp) }
     }
 }
+
+
+/**
+ * The undo control shown after a file has been written over.
+ *
+ * MetaForge overwrites the user's own photograph, in place, on their phone.
+ * A tool that does that owes them a way back, so a copy of what was there
+ * before is taken at the moment of writing and this puts it back.
+ */
+@Composable
+fun UndoRow(
+    fileName: String,
+    hasBackup: Boolean,
+    enabled: Boolean,
+    onRestore: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.05f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (hasBackup) "The original is safe" else "No undo copy was kept",
+                    color = if (hasBackup) Good else Warn,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                )
+                Text(
+                    if (hasBackup) {
+                        "$fileName as it was before this change is held for seven days."
+                    } else {
+                        "There was not enough free space to keep one, so this cannot be undone."
+                    },
+                    color = Muted,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                )
+            }
+            if (hasBackup) {
+                Spacer(Modifier.width(12.dp))
+                TextButton(onClick = onRestore, enabled = enabled) {
+                    Text("Undo", color = Accent, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}

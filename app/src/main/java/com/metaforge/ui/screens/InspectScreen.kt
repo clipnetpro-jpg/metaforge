@@ -62,6 +62,8 @@ fun InspectScreen(onBack: () -> Unit) {
     var dirty by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var failed by remember { mutableStateOf(false) }
+    var written by remember { mutableStateOf(false) }
+    var undoAvailable by remember { mutableStateOf(false) }
 
     var detail by remember { mutableStateOf<MetadataRepository.Tag?>(null) }
     var adding by remember { mutableStateOf(false) }
@@ -90,6 +92,8 @@ fun InspectScreen(onBack: () -> Unit) {
                 val s = withContext(Dispatchers.IO) { media.stage(uri) }
                 staged = s
                 dirty = false
+                written = false
+                undoAvailable = false
                 expanded = emptySet()
                 reload()
             }.onFailure { toast = it.message ?: "that file could not be opened"; failed = true }
@@ -141,9 +145,30 @@ fun InspectScreen(onBack: () -> Unit) {
             failed = r.isFailure
             toast = if (r.isSuccess) "saved into ${s.displayName}"
                     else r.exceptionOrNull()?.message ?: "the file could not be written"
-            if (r.isSuccess) dirty = false
+            if (r.isSuccess) {
+                dirty = false
+                written = true
+                undoAvailable = withContext(Dispatchers.IO) { media.hasBackup(s) }
+            }
             busy = false
         }
+    }
+
+    fun undo() {
+        val s = staged ?: return
+        busy = true; busyLabel = "Putting the original back"
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { media.restore(s) }
+            failed = r.isFailure
+            if (r.isSuccess) { written = false; undoAvailable = false; dirty = false; reload() }
+            toast = if (r.isSuccess) "${s.displayName} is back exactly as it was"
+                    else r.exceptionOrNull()?.message ?: "could not undo"
+            busy = false
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { staged?.let { media.cleanup(it) } }
     }
 
     val visible = remember(doc, query) {
@@ -206,6 +231,16 @@ fun InspectScreen(onBack: () -> Unit) {
             toast?.let {
                 Spacer(Modifier.height(10.dp))
                 InfoCard(if (failed) "Not done" else "Done", it, if (failed) Bad else Good)
+            }
+
+            if (written) {
+                Spacer(Modifier.height(12.dp))
+                UndoRow(
+                    fileName = staged?.displayName ?: "the file",
+                    hasBackup = undoAvailable,
+                    enabled = !busy,
+                    onRestore = { undo() },
+                )
             }
 
             if (staged != null) {

@@ -76,12 +76,23 @@ class PrivacyStripper(private val exifTool: ExifTool) {
         update("scan", 1f, "${sensitive.size} identifying tags found")
 
         val kept = mutableListOf<String>()
+        // Group prefixes whose tags were deliberately restored after the wipe.
+        val keptGroups = mutableSetOf<String>()
 
         stage("wipe") {
             val args = mutableListOf("-all=")
             val restore = mutableListOf<String>()
             if (options.keepOrientation) restore += "-Orientation"
-            if (options.keepColorProfile) restore += "-ICC_Profile:all"
+            if (options.keepColorProfile) {
+                restore += "-ICC_Profile:all"
+                // ExifTool reports a colour profile under several family-1
+                // groups (ICC-header, ICC_Profile, ICC-view, ICC-meas...).
+                // Matching only the literal argument meant every one of them
+                // was counted as "could not be removed", so a perfectly clean
+                // photo reported failure. Almost every phone photo has an ICC
+                // profile, so that was nearly every run.
+                keptGroups += "ICC"
+            }
             if (options.keepCaptureDate) restore += "-DateTimeOriginal"
             if (restore.isNotEmpty()) {
                 args += "-tagsFromFile"; args += "@"
@@ -103,9 +114,14 @@ class PrivacyStripper(private val exifTool: ExifTool) {
 
         stage("verify") {
             val after = readTags(file)
+            val keptTagNames = kept
+                .map { it.substringAfterLast(':') }
+                .filter { it != "all" }
+                .toSet()
             val remaining = after.keys
                 .filter { shortName(it) !in structural }
-                .filter { key -> kept.none { key.endsWith(it.substringAfterLast(':')) } }
+                .filter { shortName(it) !in keptTagNames }
+                .filter { key -> keptGroups.none { g -> key.substringBefore(':').startsWith(g) } }
             lastReport = Report(
                 removedTagCount = sensitive.size - remaining.size,
                 remaining = remaining,

@@ -66,12 +66,17 @@ private fun MetaForgeNav() {
     var status by remember { mutableStateOf(app.engineStatus) }
     var ready by remember { mutableStateOf(app.engineReady) }
     LaunchedEffect(Unit) {
-        while (!ready) {
+        // Bounded. If the engine cannot start, this used to poll every 200 ms
+        // for as long as the app was open, keeping the CPU awake to re-read a
+        // field that was never going to change.
+        val deadline = System.currentTimeMillis() + 20_000
+        while (!ready && System.currentTimeMillis() < deadline) {
             status = app.engineStatus
             ready = app.engineReady
             delay(200)
         }
         status = app.engineStatus
+        ready = app.engineReady
     }
 
     NavHost(navController = nav, startDestination = "home") {
