@@ -127,9 +127,13 @@ jobs:
           set -euxo pipefail
           mkdir -p dist
           find app/build/outputs/apk -name '*.apk' -exec cp {} dist/ \;
-          # The universal build is the one a phone should install.
+          # Almost every phone in use is arm64, and that build is half the size
+          # of the universal one, so that is the file we put someone's name on.
+          if [ -f dist/app-arm64-v8a-release.apk ]; then
+            cp dist/app-arm64-v8a-release.apk "dist/MetaForge-${GITHUB_RUN_NUMBER}-arm64.apk"
+          fi
           if [ -f dist/app-universal-release.apk ]; then
-            cp dist/app-universal-release.apk "dist/MetaForge-${GITHUB_RUN_NUMBER}.apk"
+            cp dist/app-universal-release.apk "dist/MetaForge-${GITHUB_RUN_NUMBER}-universal.apk"
           fi
           ls -lh dist
 
@@ -149,10 +153,13 @@ jobs:
           NOTES=$(printf '%s\n' \
             "MetaForge build ${GITHUB_RUN_NUMBER}" \
             "" \
-            "Install **MetaForge-${GITHUB_RUN_NUMBER}.apk** (works on every phone)." \
-            "The per-ABI files are smaller if you know your CPU: most phones are arm64-v8a." \
+            "Install **MetaForge-${GITHUB_RUN_NUMBER}-arm64.apk**. That is the right" \
+            "file for essentially every phone made in the last decade." \
             "" \
-            "ExifTool ${EXIFTOOL_VERSION} + Perl 5.38.2, running natively on device.")
+            "If it refuses to install, use MetaForge-${GITHUB_RUN_NUMBER}-universal.apk," \
+            "which carries all three CPU builds and is twice the size." \
+            "" \
+            "ExifTool ${EXIFTOOL_VERSION} and Perl 5.38.2 run natively on the device.")
           gh release create "$TAG" dist/*.apk --title "MetaForge $TAG" --notes "$NOTES" --latest
 
       - name: Enable KVM

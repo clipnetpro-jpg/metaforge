@@ -141,15 +141,21 @@ class EngineTest {
             "-XMP:Creator=Dev BD", "-IPTC:By-line=Dev BD",
             "-overwrite_original", f.absolutePath,
         )
-        val loaded = et.readAllJson(f.absolutePath).stdout
-        assertTrue("setup failed, no GPS written", loaded.contains("23.81"))
+        // Read numerically: without -n ExifTool formats GPS as 23 deg 48' 37",
+        // so asserting on the decimal it was written with silently fails.
+        val loaded = et.execute(
+            "-json", "-a", "-u", "-G1", "-n", "-charset", "utf8", f.absolutePath,
+        ).stdout
+        assertTrue("setup failed, no GPS written: $loaded", loaded.contains("23.81"))
 
         kotlinx.coroutines.runBlocking { stripper.strip(f).toList() }
 
         val report = requireNotNull(stripper.lastReport)
         assertTrue("left behind: " + report.remaining.joinToString(), report.clean)
 
-        val after = et.readAllJson(f.absolutePath).stdout
+        val after = et.execute(
+            "-json", "-a", "-u", "-G1", "-n", "-charset", "utf8", f.absolutePath,
+        ).stdout
         listOf("Pixel 9 Pro", "23.81", "90.41", "Dev BD", "Google").forEach {
             assertTrue("still leaks \"$it\": $after", !after.contains(it))
         }

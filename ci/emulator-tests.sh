@@ -40,10 +40,14 @@ rc=$?
 [ "$rc" = "124" ] && echo "::error::instrumentation timed out after 25 minutes"
 
 echo "::group::instrumentation results"
-for f in $(find app/build/outputs/androidTest-results -name '*.xml' 2>/dev/null); do
-  echo "----- $f -----"
-  sed -e 's/&#10;/\n/g' "$f" | head -c 30000
-done
+# -print0: the report file is named "TEST-emulator-5554 - 11.xml". Word
+# splitting on that turned the filename into "-", so sed sat waiting on stdin
+# and the whole workflow hung until it was cancelled.
+find app/build/outputs/androidTest-results -name '*.xml' -print0 2>/dev/null |
+  while IFS= read -r -d '' f; do
+    echo "----- $f -----"
+    sed -e 's/&#10;/\n/g' "$f" | head -c 30000
+  done
 echo "::endgroup::"
 
 echo "::group::logcat"
