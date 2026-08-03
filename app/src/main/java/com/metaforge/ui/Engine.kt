@@ -1,7 +1,6 @@
 package com.metaforge.ui
 
 import android.content.Context
-import com.metaforge.app.BuildConfig
 import com.metaforge.data.MediaAccess
 import com.metaforge.engine.ExifTool
 
@@ -9,7 +8,7 @@ import com.metaforge.engine.ExifTool
 object Engine {
 
     fun exifTool(context: Context): ExifTool? =
-        ExifTool.get(context.applicationContext, BuildConfig.VERSION_NAME)
+        ExifTool.get(context.applicationContext)
 
     fun media(context: Context): MediaAccess = MediaAccess(context.applicationContext)
 
