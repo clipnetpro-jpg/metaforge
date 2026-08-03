@@ -22,6 +22,7 @@ class AiDetector(private val exifTool: ExifTool) {
 
     private val stages = listOf(
         Stage("provenance", "Reading provenance and credentials"),
+        Stage("watermark", "Looking for an invisible watermark"),
         Stage("pixels", "Measuring the pixels"),
         Stage("weigh", "Weighing the evidence"),
     )
@@ -29,6 +30,19 @@ class AiDetector(private val exifTool: ExifTool) {
     @Volatile
     var lastResult: DetectionResult? = null
         private set
+
+    private companion object {
+        /**
+         * Said out loud rather than buried: some watermarks are unreadable by
+         * design, and a detector that stays quiet about that is misleading.
+         */
+        const val INVISIBLE_LIMIT =
+            "Nothing in this file declares its origin and no readable watermark is present, so " +
+                "this score comes from pixel statistics alone. Some generators, Google's SynthID " +
+                "among them, hide a mark that only its issuer can verify: no app can read it, so " +
+                "a clean result here never proves an image is real. Screenshots, heavy edits and " +
+                "messaging apps also move these numbers."
+    }
 
     fun analyse(file: File, bitmap: Bitmap?): Flow<OperationProgress> = progressFlow(
         title = "Checking for AI generation",
@@ -39,6 +53,14 @@ class AiDetector(private val exifTool: ExifTool) {
         val scan = stage("provenance") { ProvenanceScanner(exifTool).scan(file) }
         update("provenance", 1f, "${scan.tags.size} tags read")
 
+        val watermark = if (bitmap != null) {
+            stage("watermark") { WatermarkScanner.scan(bitmap) }
+        } else {
+            skip("watermark", "no image to read")
+            WatermarkScanner.Result(emptyList(), null, null)
+        }
+        watermark.identified?.let { update("watermark", 1f, "$it watermark recovered") }
+
         val forensics = if (bitmap != null) {
             stage("pixels") { ForensicAnalyzer.analyse(bitmap) }
         } else {
@@ -47,11 +69,11 @@ class AiDetector(private val exifTool: ExifTool) {
         }
 
         stage("weigh") {
-            val evidence = scan.evidence + forensics.evidence
+            val evidence = scan.evidence + watermark.evidence + forensics.evidence
             val proof = evidence.firstOrNull { it.decisive }
 
             val forensicScore = forensics.evidence.sumOf { it.weight.toDouble() }.toFloat()
-            val provenanceScore = scan.evidence.filterNot { it.decisive }
+            val provenanceScore = (scan.evidence + watermark.evidence).filterNot { it.decisive }
                 .sumOf { it.weight.toDouble() }.toFloat()
 
             val score: Int
@@ -83,15 +105,15 @@ class AiDetector(private val exifTool: ExifTool) {
                 }
             }
 
-            val note = when (verdict) {
-                Verdict.CONFIRMED_AI ->
+            val note = when {
+                watermark.identified != null ->
+                    "Read out of the pixels themselves. A watermark like this survives a metadata " +
+                        "wipe, a crop and a screenshot, so this is the strongest kind of answer."
+                verdict == Verdict.CONFIRMED_AI ->
                     "Based on a declaration inside the file, not on a guess about the pixels."
-                Verdict.CONFIRMED_CAPTURE ->
+                verdict == Verdict.CONFIRMED_CAPTURE ->
                     "Based on a signed capture credential, not on a guess about the pixels."
-                else ->
-                    "No provenance data survived in this file, so this is an estimate from " +
-                        "pixel statistics alone. Screenshots, heavy edits and messaging apps " +
-                        "all push these numbers around. Treat it as a hint, not a finding."
+                else -> INVISIBLE_LIMIT
             }
 
             lastResult = DetectionResult(
