@@ -148,13 +148,12 @@ jobs:
           # exactly what left ExifTool unable to load anything.
           cp -a ./lib/. "$OUT/perl5/"
 
-          # Each extension is staged by MakeMaker into its own blib/lib. In a
-          # cross build those copies never make it back into ./lib, which is
-          # why POSIX.pm, Fcntl.pm, IO.pm and Encode.pm were absent from every
-          # APK so far even though their object code was linked in.
-          find . -type d -path '*/blib/lib' -print0 | while IFS= read -r -d '' d; do
-            cp -a "$d/." "$OUT/perl5/"
-          done
+          # A cross build links every extension into the interpreter but never
+          # copies its .pm half anywhere: POSIX.pm, Fcntl.pm, IO.pm, Encode.pm
+          # and friends stay behind in ext/, dist/ and cpan/. That is why every
+          # APK so far shipped the object code for those modules and none of the
+          # Perl that loads it. Lay them out at the paths @INC expects.
+          python3 "$GITHUB_WORKSPACE/ci/harvest-perl-modules.py" "$OUT/perl5"
 
           # Static interpreter: the .a archives are already inside libperl.so.
           find "$OUT/perl5" -name '*.a' -delete
