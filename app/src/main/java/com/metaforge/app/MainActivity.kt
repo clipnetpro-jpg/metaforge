@@ -4,132 +4,79 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
-import com.metaforge.engine.ExifTool
-import com.metaforge.engine.PerlRuntime
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.metaforge.ui.screens.*
 import com.metaforge.ui.theme.MetaForgeTheme
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
+/**
+ * One activity, five destinations.
+ *
+ * The splash screen stays up until the engine has finished warming, which the
+ * Application already started before this activity existed, so the first screen
+ * the user touches is one where every action is immediately usable.
+ */
 class MainActivity : ComponentActivity() {
 
-    private var engineReady by mutableStateOf(false)
-    private var report by mutableStateOf("Starting engine...")
+    private var warmed by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splash = installSplashScreen()
-        splash.setKeepOnScreenCondition { !engineReady }
+        splash.setKeepOnScreenCondition { !warmed }
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         lifecycleScope.launch {
-            report = withContext(Dispatchers.IO) { selfTest() }
-            engineReady = true
+            // Do not hold the splash hostage to a broken engine: after two
+            // seconds the app opens anyway and reports the failure in the UI.
+            val deadline = System.currentTimeMillis() + 2_000
+            while (!MetaForgeApp.instance.engineReady && System.currentTimeMillis() < deadline) {
+                delay(50)
+            }
+            warmed = true
         }
 
         setContent {
             MetaForgeTheme {
-                Surface(Modifier.fillMaxSize()) { HomeScreen(report) }
+                Surface(Modifier.fillMaxSize(), color = Color(0xFF0B0B12)) {
+                    MetaForgeNav()
+                }
             }
         }
-    }
-
-    private fun selfTest(): String = buildString {
-        val stamp = BuildConfig.VERSION_NAME
-        appendLine("MetaForge $stamp")
-        appendLine()
-        val ok = PerlRuntime.ensureReady(this@MainActivity)
-        appendLine("Native lib dir : ${applicationInfo.nativeLibraryDir}")
-        appendLine("Perl binary    : ${if (ok) "found" else "MISSING"}")
-        if (!ok) return@buildString
-        appendLine("Perl version   : ${PerlRuntime.runOnce("-e", "print \"\$^V on \$^O\"")}")
-        val et = ExifTool.get(this@MainActivity)
-        if (et == null) {
-            appendLine("ExifTool       : FAILED TO START")
-            return@buildString
-        }
-        appendLine("ExifTool ver   : ${et.version()}")
-        appendLine()
-        val t0 = System.nanoTime()
-        et.execute("-ver")
-        val ms = (System.nanoTime() - t0) / 1_000_000.0
-        appendLine("Round trip     : %.1f ms".format(ms))
-        appendLine()
-        appendLine("Supported file types:")
-        appendLine(et.execute("-listf").stdout.take(600))
     }
 }
 
 @Composable
-private fun HomeScreen(report: String) {
-    val pulse = rememberInfiniteTransition(label = "pulse")
-    val scale by pulse.animateFloat(
-        initialValue = 0.98f,
-        targetValue = 1.02f,
-        animationSpec = infiniteRepeatable(tween(1800, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "scale",
-    )
+private fun MetaForgeNav() {
+    val nav = rememberNavController()
+    val app = MetaForgeApp.instance
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color(0xFF0B0B12), Color(0xFF161427), Color(0xFF0B0B12))
-                )
-            )
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp)
-            .statusBarsPadding(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Spacer(Modifier.height(32.dp))
-        Text(
-            "MetaForge",
-            fontSize = 34.sp,
-            fontWeight = FontWeight.Black,
-            color = Color(0xFF22D3EE),
-            modifier = Modifier.scale(scale),
-        )
-        Text(
-            "metadata engine self-test",
-            fontSize = 13.sp,
-            color = Color(0xFF8B8BA7),
-        )
-        Spacer(Modifier.height(28.dp))
-        Card(
-            shape = RoundedCornerShape(18.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF14141F)),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                report,
-                modifier = Modifier.padding(18.dp),
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                color = Color(0xFFD7D7EA),
-                lineHeight = 18.sp,
+    NavHost(navController = nav, startDestination = "home") {
+        composable("home") {
+            HomeScreen(
+                engineStatus = app.engineStatus,
+                engineReady = app.engineReady,
+                onInspect = { nav.navigate("inspect") },
+                onTransplant = { nav.navigate("transplant") },
+                onStrip = { nav.navigate("strip") },
+                onDetect = { nav.navigate("detect") },
+                onDiagnostics = { nav.navigate("diagnostics") },
             )
         }
-        Spacer(Modifier.height(24.dp))
+        composable("inspect") { InspectScreen(onBack = { nav.popBackStack() }) }
+        composable("transplant") { TransplantScreen(onBack = { nav.popBackStack() }) }
+        composable("strip") { StripScreen(onBack = { nav.popBackStack() }) }
+        composable("detect") { DetectScreen(onBack = { nav.popBackStack() }) }
+        composable("diagnostics") { DiagnosticsScreen(onBack = { nav.popBackStack() }) }
     }
 }
