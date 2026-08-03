@@ -19,6 +19,7 @@ import com.metaforge.engine.PrivacyStripper
 import com.metaforge.ui.Engine
 import com.metaforge.ui.components.LiveProgressPanel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

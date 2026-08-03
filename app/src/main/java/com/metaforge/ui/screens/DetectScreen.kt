@@ -30,6 +30,7 @@ import com.metaforge.ui.components.EvidenceOverlay
 import com.metaforge.ui.components.LiveProgressPanel
 import com.metaforge.ui.components.ScanningOverlay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

@@ -61,11 +61,24 @@ private fun MetaForgeNav() {
     val nav = rememberNavController()
     val app = MetaForgeApp.instance
 
+    // The Application warms the engine on a background thread and reports plain
+    // fields, so poll them until it settles rather than showing a stale label.
+    var status by remember { mutableStateOf(app.engineStatus) }
+    var ready by remember { mutableStateOf(app.engineReady) }
+    LaunchedEffect(Unit) {
+        while (!ready) {
+            status = app.engineStatus
+            ready = app.engineReady
+            delay(200)
+        }
+        status = app.engineStatus
+    }
+
     NavHost(navController = nav, startDestination = "home") {
         composable("home") {
             HomeScreen(
-                engineStatus = app.engineStatus,
-                engineReady = app.engineReady,
+                engineStatus = status,
+                engineReady = ready,
                 onInspect = { nav.navigate("inspect") },
                 onTransplant = { nav.navigate("transplant") },
                 onStrip = { nav.navigate("strip") },
