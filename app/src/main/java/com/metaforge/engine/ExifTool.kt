@@ -101,9 +101,11 @@ class ExifTool private constructor(private val context: Context) {
                 BufferedReader(InputStreamReader(p.inputStream, Charsets.UTF_8)),
                 BufferedReader(InputStreamReader(p.errorStream, Charsets.UTF_8)),
             )
-            // Probe before trusting it.
-            val probe = d.exec(arrayOf("-ver"))
-            if (!probe.ok || !Regex("""\d+\.\d+""").containsMatchIn(probe.stdout)) {
+            // Probe before trusting it, under a deadline: a daemon that never
+            // answers must not wedge the caller's thread forever.
+            val probe = withDeadline(20_000) { d.exec(arrayOf("-ver")) }
+                ?: Result("", "daemon probe timed out", false)
+            if (!probe.ok || !Regex("""^\d+\.\d+""").containsMatchIn(probe.stdout.trim())) {
                 startupError = buildString {
                     append("daemon probe returned '${probe.stdout.trim()}'")
                     if (probe.stderr.isNotBlank()) append("; stderr: ${probe.stderr}")
@@ -118,6 +120,20 @@ class ExifTool private constructor(private val context: Context) {
             startupError = "${it::class.simpleName}: ${it.message}"
             Log.w(TAG, "daemon start failed, falling back to one-shot", it)
         }.getOrNull()
+    }
+
+    /** Runs [block] on a throwaway thread, giving up after [ms]. */
+    private fun <T> withDeadline(ms: Long, block: () -> T): T? {
+        var out: T? = null
+        val t = Thread { out = runCatching(block).getOrNull() }
+        t.isDaemon = true
+        t.start()
+        t.join(ms)
+        if (t.isAlive) {
+            t.interrupt()
+            return null
+        }
+        return out
     }
 
     // ---------------------------------------------------------------- one-shot
@@ -211,20 +227,33 @@ class ExifTool private constructor(private val context: Context) {
 
         @Volatile private var instance: ExifTool? = null
 
+        /**
+         * Why the last [get] returned null. Kept so callers can report the real
+         * Perl error instead of a bare "engine did not start".
+         */
+        @Volatile
+        var lastStartupDiagnostics: String = "engine has not been started yet"
+            private set
+
         fun get(context: Context, stamp: String): ExifTool? {
             instance?.let { return it }
             synchronized(this) {
                 instance?.let { return it }
-                if (!PerlRuntime.ensureReady(context, stamp)) return null
+                if (!PerlRuntime.ensureReady(context, stamp)) {
+                    lastStartupDiagnostics = "runtime assets not ready\n" + PerlRuntime.describe()
+                    return null
+                }
                 val et = ExifTool(context.applicationContext)
                 et.daemon = et.startDaemon()
                 et.mode = if (et.daemon != null) Mode.DAEMON else Mode.ONE_SHOT
                 Log.i(TAG, "engine ready in ${et.mode} mode")
                 // Only hand back an engine that can actually answer.
-                if (!Regex("""\d+\.\d+""").containsMatchIn(et.version())) {
-                    Log.e(TAG, "engine unusable: ${et.diagnose()}")
+                if (!Regex("""^\d+\.\d+""").containsMatchIn(et.version().trim())) {
+                    lastStartupDiagnostics = et.diagnose()
+                    Log.e(TAG, "engine unusable: $lastStartupDiagnostics")
                     return null
                 }
+                lastStartupDiagnostics = "engine started in ${et.mode} mode"
                 instance = et
                 return et
             }

@@ -21,8 +21,9 @@ android {
     signingConfigs {
         create("release") {
             val ks = System.getenv("KEYSTORE_PATH")
-            if (ks != null) {
+            if (!ks.isNullOrBlank()) {
                 storeFile = file(ks)
+                storeType = "PKCS12"
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
@@ -32,11 +33,16 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // The APK is dominated by the Perl tree, not by dex, so shrinking buys
+            // little and risks stripping something ONNX or OpenCV reaches by name.
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            if (System.getenv("KEYSTORE_PATH") != null) {
-                signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (!System.getenv("KEYSTORE_PATH").isNullOrBlank()) {
+                signingConfigs.getByName("release")
+            } else {
+                // Never ship an unsigned APK: an unsigned build cannot be installed.
+                signingConfigs.getByName("debug")
             }
         }
         debug { applicationIdSuffix = ".debug" }

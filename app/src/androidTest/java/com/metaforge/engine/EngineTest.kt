@@ -19,6 +19,11 @@ class EngineTest {
     private val ctx = InstrumentationRegistry.getInstrumentation().targetContext
     private val stamp = "test"
 
+    /** The engine, or a failure that carries the real Perl error with it. */
+    private fun engine(): ExifTool =
+        ExifTool.get(ctx, stamp)
+            ?: throw AssertionError("engine unavailable\n" + ExifTool.lastStartupDiagnostics)
+
     @Test
     fun perlInterpreterRuns() {
         assertTrue("runtime not ready", PerlRuntime.ensureReady(ctx, stamp))
@@ -27,30 +32,46 @@ class EngineTest {
     }
 
     @Test
+    fun perlCoreModulesLoad() {
+        assertTrue("runtime not ready", PerlRuntime.ensureReady(ctx, stamp))
+        val out = PerlRuntime.runOnce(
+            "-MPOSIX", "-MFcntl", "-MIO::File", "-MEncode", "-MList::Util",
+            "-e", "print 'MODULES OK'",
+        )
+        assertTrue(
+            "core XS modules did not load.\n--- output ---\n$out\n--- runtime ---\n" +
+                PerlRuntime.describe(),
+            out.contains("MODULES OK"),
+        )
+    }
+
+    @Test
     fun exifToolScriptRunsOneShot() {
         assertTrue(PerlRuntime.ensureReady(ctx, stamp))
-        val out = PerlRuntime.runOnce(PerlRuntime.exifToolScript.absolutePath, "-ver")
+        val out = PerlRuntime.runOnce(PerlRuntime.exifToolScript.absolutePath, "-ver").trim()
         android.util.Log.i("ExifTool", "one-shot -ver output:\n$out")
         android.util.Log.i("PerlRuntime", PerlRuntime.describe())
+        // Anchored: an "@INC" error also contains a x.y number, and matching that
+        // is how this test used to pass while the engine was completely broken.
         assertTrue(
             "exiftool one-shot failed.\n--- output ---\n$out\n--- runtime ---\n" +
                 PerlRuntime.describe(),
-            Regex("""\d+\.\d+""").containsMatchIn(out),
+            Regex("""^\d+\.\d+""").containsMatchIn(out),
         )
     }
 
     @Test
     fun exifToolReportsVersion() {
-        val et = requireNotNull(ExifTool.get(ctx, stamp)) { "ExifTool daemon did not start" }
+        val et = engine()
         val v = et.version()
         android.util.Log.i("ExifTool", "mode=${et.mode} version=$v")
         assertTrue("unexpected version: '$v'\n" + et.diagnose(),
-                   Regex("""^\d+\.\d+""").containsMatchIn(v))
+                   Regex("""^\d+\.\d+""").containsMatchIn(v.trim()))
     }
 
     @Test
     fun readsAndWritesRealMetadata() {
-        val et = requireNotNull(ExifTool.get(ctx, stamp))
+        val et = engine()
         val jpg = File(ctx.cacheDir, "probe.jpg")
         jpg.writeBytes(MINIMAL_JPEG)
 
@@ -63,7 +84,7 @@ class EngineTest {
 
     @Test
     fun transplantsMetadataBetweenFiles() {
-        val et = requireNotNull(ExifTool.get(ctx, stamp))
+        val et = engine()
         val src = File(ctx.cacheDir, "src.jpg").apply { writeBytes(MINIMAL_JPEG) }
         val dst = File(ctx.cacheDir, "dst.jpg").apply { writeBytes(MINIMAL_JPEG) }
 
@@ -78,7 +99,7 @@ class EngineTest {
 
     @Test
     fun transplantReportsFullCoverage() {
-        val et = requireNotNull(ExifTool.get(ctx, stamp))
+        val et = engine()
         val engine = TransplantEngine(et)
         val src = File(ctx.cacheDir, "cov_src.jpg").apply { writeBytes(MINIMAL_JPEG) }
         val dst = File(ctx.cacheDir, "cov_dst.jpg").apply { writeBytes(MINIMAL_JPEG) }
@@ -108,7 +129,7 @@ class EngineTest {
 
     @Test
     fun privacyStripperLeavesNothingIdentifying() {
-        val et = requireNotNull(ExifTool.get(ctx, stamp))
+        val et = engine()
         val stripper = PrivacyStripper(et)
         val f = File(ctx.cacheDir, "priv.jpg").apply { writeBytes(MINIMAL_JPEG) }
 

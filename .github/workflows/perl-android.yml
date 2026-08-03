@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: out/${{ matrix.abi }}
-          key: perl-${{ matrix.abi }}-${{ env.PERL_VERSION }}-${{ env.PERL_CROSS_VERSION }}-v4
+          key: perl-${{ matrix.abi }}-${{ env.PERL_VERSION }}-${{ env.PERL_CROSS_VERSION }}-v5
 
       - name: Fetch sources
         if: steps.cache.outputs.cache-hit != 'true'
@@ -136,16 +136,43 @@ jobs:
         run: |
           set -euxo pipefail
           OUT="$GITHUB_WORKSPACE/out/${{ matrix.abi }}"
-          mkdir -p "$OUT/jniLibs" "$OUT/perl5"
+          rm -rf "$OUT"; mkdir -p "$OUT/jniLibs" "$OUT/perl5"
           cp ./perl "$OUT/jniLibs/libperl.so"
           "$STRIP" "$OUT/jniLibs/libperl.so"
-          make DESTDIR="$GITHUB_WORKSPACE/perlroot" install > install.log 2>&1 || tail -n 40 install.log
-          SRC="$GITHUB_WORKSPACE/perlroot/system/metaforge/perl/lib"
-          if [ -d "$SRC" ]; then cp -a "$SRC/." "$OUT/perl5/"; else cp -a ./lib/. "$OUT/perl5/"; fi
+
+          # Ship the build tree's own lib/ rather than `make install` output.
+          # lib/ is the flat @INC the freshly built interpreter uses for its own
+          # test suite: pure-Perl modules AND the .pm half of every statically
+          # linked XS extension (POSIX, Fcntl, IO, Encode, List::Util...).
+          # installperl drops those .pm files for a -Dusedl=undef build, which is
+          # exactly what left ExifTool unable to load anything.
+          cp -a ./lib/. "$OUT/perl5/"
+
+          # Static interpreter: the .a archives are already inside libperl.so.
+          find "$OUT/perl5" -name '*.a' -delete
+          find "$OUT/perl5" -name '*.bs' -delete
           find "$OUT/perl5" -name '*.pod' -delete
           find "$OUT/perl5" -type d -name 't' -prune -exec rm -rf {} + 2>/dev/null || true
+          rm -rf "$OUT/perl5/pod" "$OUT/perl5/CPAN" "$OUT/perl5/CPANPLUS" \
+                 "$OUT/perl5/TAP" "$OUT/perl5/Test2" "$OUT/perl5/Test" \
+                 "$OUT/perl5/ExtUtils/CBuilder" "$OUT/perl5/unicore/TestProp.pl" \
+                 "$OUT/perl5/CPAN.pm" "$OUT/perl5/Test.pm" "$OUT/perl5/Test2.pm"
+
+          # Refuse to publish a tree ExifTool cannot run on.
+          MISSING=""
+          for m in Config.pm Config_heavy.pl Errno.pm strict.pm warnings.pm \
+                   POSIX.pm Fcntl.pm IO.pm IO/File.pm File/Spec.pm Cwd.pm \
+                   Encode.pm List/Util.pm Scalar/Util.pm Time/Local.pm \
+                   Digest/MD5.pm Compress/Zlib.pm; do
+            [ -f "$OUT/perl5/$m" ] || MISSING="$MISSING $m"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::staged perl tree is missing:$MISSING"
+            ls "$OUT/perl5" | head -50
+            exit 1
+          fi
           cp "$GITHUB_WORKSPACE/bionic-flags.txt" "$OUT/" 2>/dev/null || true
-          du -sh "$OUT"
+          du -sh "$OUT" "$OUT/perl5"
 
       - uses: actions/upload-artifact@v4
         with:

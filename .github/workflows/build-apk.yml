@@ -4,9 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       run_emulator_test:
-        description: 'Run on-device tests in an Android emulator'
+        description: 'Run the engine tests in an Android emulator'
         type: boolean
         default: true
+      publish_release:
+        description: 'Publish a GitHub Release with the signed APK'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
 
 env:
   EXIFTOOL_VERSION: '13.59'
@@ -50,26 +57,26 @@ jobs:
             cp "perlout/perl-$abi/jniLibs/libperl.so" "$JNI/$abi/libperl.so"
           done
 
-          # The Perl library tree is identical across ABIs apart from Config*
-          # and the arch directory, so ship one shared zip plus a tiny per-ABI zip.
+          # The staged Perl tree is a flat @INC. Everything in it is
+          # architecture independent except these four generated files, so one
+          # shared zip plus a tiny per-ABI zip covers all three ABIs.
+          ARCH_FILES="Config.pm Config_heavy.pl Config_git.pl Errno.pm"
+
           BASE=perlout/perl-arm64-v8a/perl5
+          test -f "$BASE/POSIX.pm"   # guards against the old broken layout
+          test -f "$BASE/strict.pm"
+
           rm -rf staging && mkdir -p staging/perl5
           cp -a "$BASE/." staging/perl5/
-          ARCHDIRS=$(find staging/perl5 -maxdepth 1 -type d -name '*-android*' -printf '%f\n' || true)
-          rm -f staging/perl5/Config.pm staging/perl5/Config_heavy.pl
-          for d in $ARCHDIRS; do rm -rf "staging/perl5/$d"; done
-          # trim things ExifTool never loads
-          rm -rf staging/perl5/unicore/TestProp.pl staging/perl5/CPAN staging/perl5/CPANPLUS \
-                 staging/perl5/ExtUtils/CBuilder staging/perl5/TAP staging/perl5/Test2 \
-                 staging/perl5/Test staging/perl5/pod 2>/dev/null || true
+          for f in $ARCH_FILES; do rm -f "staging/perl5/$f"; done
           (cd staging && zip -qr9 "../$ASSETS/perl5.zip" perl5)
 
           for abi in arm64-v8a armeabi-v7a x86_64; do
             rm -rf archstage && mkdir -p archstage/perl5
             SRC="perlout/perl-$abi/perl5"
-            cp "$SRC/Config.pm" "$SRC/Config_heavy.pl" archstage/perl5/ 2>/dev/null || true
-            for d in $(find "$SRC" -maxdepth 1 -type d -name '*-android*' -printf '%f\n' || true); do
-              cp -a "$SRC/$d" archstage/perl5/
+            for f in $ARCH_FILES; do
+              test -f "$SRC/$f" || { echo "::error::$abi is missing $f"; exit 1; }
+              cp "$SRC/$f" archstage/perl5/
             done
             (cd archstage && zip -qr9 "../$ASSETS/perl5-$abi.zip" perl5)
           done
@@ -93,14 +100,37 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+      - name: Decode signing keystore
+        id: signing
+        env:
+          KS_B64: ${{ secrets.MF_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/metaforge.p12"
+            echo "path=$RUNNER_TEMP/metaforge.p12" >> "$GITHUB_OUTPUT"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::no MF_KEYSTORE_B64 secret; release APK will be unsigned"
+          fi
+
+      - name: Build APKs
+        env:
+          KEYSTORE_PATH: ${{ steps.signing.outputs.path }}
+          KEYSTORE_PASSWORD: ${{ secrets.MF_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MF_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MF_KEYSTORE_PASSWORD }}
+        run: gradle --no-daemon assembleDebug assembleRelease
 
       - name: Collect APKs
         run: |
           set -euxo pipefail
           mkdir -p dist
           find app/build/outputs/apk -name '*.apk' -exec cp {} dist/ \;
+          # The universal build is the one a phone should install.
+          if [ -f dist/app-universal-release.apk ]; then
+            cp dist/app-universal-release.apk "dist/MetaForge-${GITHUB_RUN_NUMBER}.apk"
+          fi
           ls -lh dist
 
       - uses: actions/upload-artifact@v4
@@ -108,6 +138,22 @@ jobs:
           name: MetaForge-APK
           path: dist/*.apk
           retention-days: 90
+
+      - name: Publish release
+        if: inputs.publish_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v0.1.${GITHUB_RUN_NUMBER}"
+          NOTES=$(printf '%s\n' \
+            "MetaForge build ${GITHUB_RUN_NUMBER}" \
+            "" \
+            "Install **MetaForge-${GITHUB_RUN_NUMBER}.apk** (works on every phone)." \
+            "The per-ABI files are smaller if you know your CPU: most phones are arm64-v8a." \
+            "" \
+            "ExifTool ${EXIFTOOL_VERSION} + Perl 5.38.2, running natively on device.")
+          gh release create "$TAG" dist/*.apk --title "MetaForge $TAG" --notes "$NOTES" --latest
 
       - name: Enable KVM
         if: inputs.run_emulator_test
@@ -132,20 +178,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
-          script: |
-            set +e
-            gradle --no-daemon connectedDebugAndroidTest
-            rc=$?
-            echo "::group::instrumentation results"
-            for f in $(find app/build/outputs/androidTest-results -name '*.xml' 2>/dev/null); do
-              echo "----- $f -----"
-              sed -e 's/&#10;/\n/g' "$f" | head -c 20000
-            done
-            echo "::endgroup::"
-            echo "::group::logcat"
-            adb logcat -d -v brief PerlRuntime:V ExifTool:V InpaintEngine:V AndroidRuntime:E System.err:V '*:S' | tail -n 200
-            echo "::endgroup::"
-            exit $rc
+          script: bash ci/emulator-tests.sh
 
       - uses: actions/upload-artifact@v4
         if: always() && inputs.run_emulator_test
