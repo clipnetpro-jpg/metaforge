@@ -35,15 +35,15 @@ class MetaForgeApp : Application() {
             val t0 = System.nanoTime()
             val ok = PerlRuntime.ensureReady(this@MetaForgeApp)
             if (!ok) {
-                engineStatus = "runtime unpack failed"
+                engineStatus = "Engine could not start"
                 return@launch
             }
             val et = ExifTool.get(this@MetaForgeApp)
             warmupMs = (System.nanoTime() - t0) / 1_000_000
             engineReady = et != null
             engineStatus = when {
-                et == null -> "engine unavailable"
-                else -> "ExifTool ${et.version()} (${et.mode}) in ${warmupMs} ms"
+                et == null -> "Engine could not start"
+                else -> "Ready in $warmupMs ms"
             }
             Log.i("MetaForgeApp", engineStatus)
         }

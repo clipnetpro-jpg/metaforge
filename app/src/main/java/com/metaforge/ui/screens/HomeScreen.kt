@@ -63,7 +63,7 @@ fun HomeScreen(
                 modifier = Modifier.scale(scale),
             )
             Text(
-                "the real ExifTool, running on your phone",
+                "everything inside your photos and videos",
                 fontSize = 13.sp,
                 color = Muted,
             )
@@ -120,7 +120,7 @@ fun HomeScreen(
 
             Spacer(Modifier.height(20.dp))
             TextButton(onClick = onDiagnostics) {
-                Text("Engine report", color = Muted, fontSize = 13.sp)
+                Text("Engine", color = Muted, fontSize = 13.sp)
             }
             Spacer(Modifier.height(28.dp))
         }

@@ -6,6 +6,7 @@ import android.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlin.math.sin
+import kotlinx.coroutines.flow.toList
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -46,6 +47,40 @@ class WatermarkTest {
         assertNull(
             "claimed a watermark that is not there: " + result.evidence.joinToString { it.title },
             result.identified,
+        )
+    }
+
+    @Test
+    fun removesTheMarkAndProvesItIsGone() {
+        val bitmap = testAssets.open("sd_watermarked.jpg").use { BitmapFactory.decodeStream(it) }
+        requireNotNull(bitmap) { "fixture did not decode" }
+        assertEquals("Stable Diffusion", WatermarkScanner.scan(bitmap).identified)
+
+        val progress = kotlinx.coroutines.runBlocking {
+            WatermarkRemover.clean(bitmap, WatermarkRemover.Options(removeHiddenMark = true))
+                .toList()
+        }
+        assertTrue("no progress reported", progress.isNotEmpty())
+
+        val report = requireNotNull(WatermarkRemover.lastReport) { "no report produced" }
+        assertNull("the mark survived removal", WatermarkScanner.scan(report.cleaned).identified)
+        assertTrue(
+            "the picture was altered too much: ${report.visualDifference}",
+            report.visualDifference < 4.0,
+        )
+    }
+
+    @Test
+    fun findsAMarkAfterTheImageHasBeenTrimmed() {
+        val full = testAssets.open("sd_watermarked.jpg").use { BitmapFactory.decodeStream(it) }
+        requireNotNull(full) { "fixture did not decode" }
+        // Trim whole rows off the top and bottom: the reading grid starts in a
+        // different place and the payload comes back rotated.
+        val cropped = Bitmap.createBitmap(full, 0, 8, full.width, full.height - 40)
+        assertEquals(
+            "a trimmed copy hid the mark",
+            "Stable Diffusion",
+            WatermarkScanner.scan(cropped).identified,
         )
     }
 

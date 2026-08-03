@@ -31,6 +31,11 @@ class AiDetector(private val exifTool: ExifTool) {
     var lastResult: DetectionResult? = null
         private set
 
+    /** Whether the last analysis found something the user could choose to remove. */
+    @Volatile
+    var lastRemovable: Boolean = false
+        private set
+
     private companion object {
         /**
          * Said out loud rather than buried: some watermarks are unreadable by
@@ -57,7 +62,7 @@ class AiDetector(private val exifTool: ExifTool) {
             stage("watermark") { WatermarkScanner.scan(bitmap) }
         } else {
             skip("watermark", "no image to read")
-            WatermarkScanner.Result(emptyList(), null, null)
+            WatermarkScanner.Result(emptyList(), null, null, emptyList(), false)
         }
         watermark.identified?.let { update("watermark", 1f, "$it watermark recovered") }
 
@@ -116,13 +121,15 @@ class AiDetector(private val exifTool: ExifTool) {
                 else -> INVISIBLE_LIMIT
             }
 
+            lastRemovable = watermark.removable
             lastResult = DetectionResult(
                 verdict = verdict,
                 aiScore = score,
                 confidence = confidence,
                 evidence = evidence.sortedByDescending { kotlin.math.abs(it.weight) },
                 heatmap = forensics.heatmap,
-                hotspots = if (verdict == Verdict.CONFIRMED_CAPTURE) emptyList() else forensics.hotspots,
+                hotspots = watermark.marks +
+                    if (verdict == Verdict.CONFIRMED_CAPTURE) emptyList() else forensics.hotspots,
                 modelAccuracyNote = note,
                 elapsedMs = (System.nanoTime() - t0) / 1_000_000,
             )

@@ -9,43 +9,58 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.metaforge.engine.PerlRuntime
 import com.metaforge.ui.Engine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Everything the engine knows about itself, in one screen.
+ * A plain answer to "is it working, and how fast".
  *
- * When something does go wrong on a device we have never seen, this is the
- * screen that answers it: the real Perl error, verbatim, rather than a shrug.
+ * Deliberately says nothing about how the app is built. What the engine is made
+ * of is our business; what the user needs is whether it is ready, how quickly it
+ * answers, and what it can open.
  */
 @Composable
 fun DiagnosticsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var text by remember { mutableStateOf("running self test...") }
+    var ready by remember { mutableStateOf<Boolean?>(null) }
+    var roundTripMs by remember { mutableStateOf(0.0) }
+    var formats by remember { mutableStateOf(0) }
+    var formatList by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(true) }
 
     fun refresh() {
         busy = true
         scope.launch {
-            text = withContext(Dispatchers.IO) { selfTest(context) }
+            withContext(Dispatchers.IO) {
+                val engine = Engine.exifTool(context)
+                if (engine == null) {
+                    ready = false
+                    return@withContext
+                }
+                val t0 = System.nanoTime()
+                engine.execute("-ver")
+                roundTripMs = (System.nanoTime() - t0) / 1_000_000.0
+                val list = engine.execute("-listf").stdout
+                    .substringAfter(":")
+                    .split(Regex("\\s+"))
+                    .filter { it.isNotBlank() }
+                formats = list.size
+                formatList = list.joinToString(" ")
+                ready = true
+            }
             busy = false
         }
     }
 
     LaunchedEffect(Unit) { refresh() }
 
-    ScreenScaffold(
-        title = "Engine diagnostics",
-        subtitle = "Perl, ExifTool and the runtime tree",
-        onBack = onBack,
-    ) { pad ->
+    ScreenScaffold(title = "Engine", subtitle = "speed and supported files", onBack = onBack) { pad ->
         Column(
             Modifier
                 .fillMaxSize()
@@ -53,56 +68,52 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                 .padding(horizontal = 16.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
-            if (busy) {
-                LinearProgressIndicator(
-                    Modifier.fillMaxWidth(),
-                    color = Accent,
-                    trackColor = Color.White.copy(alpha = 0.08f),
-                )
-                Spacer(Modifier.height(12.dp))
-            }
+            WorkingBar(busy, "Checking")
+
+            Spacer(Modifier.height(12.dp))
             Card(
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.05f)),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = (if (ready == false) Bad else Good).copy(alpha = 0.10f),
+                ),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(
-                    text,
-                    modifier = Modifier.padding(16.dp),
-                    color = Color(0xFFB9F5FF),
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    lineHeight = 17.sp,
-                )
+                Column(Modifier.padding(20.dp)) {
+                    Text(
+                        when (ready) {
+                            true -> "Ready"
+                            false -> "Not available on this device"
+                            null -> "Starting"
+                        },
+                        color = if (ready == false) Bad else Good,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 20.sp,
+                    )
+                    if (ready == true) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "%.0f ms per request".format(roundTripMs),
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "$formats file formats can be opened",
+                            color = Muted,
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
             }
-            Spacer(Modifier.height(14.dp))
-            RunButton("Run again", !busy) { refresh() }
+
+            if (formatList.isNotBlank()) {
+                Spacer(Modifier.height(14.dp))
+                InfoCard("What you can open", formatList)
+            }
+
+            Spacer(Modifier.height(16.dp))
+            RunButton("Check again", !busy) { refresh() }
             Spacer(Modifier.height(28.dp))
         }
     }
-}
-
-private fun selfTest(context: android.content.Context): String = buildString {
-    val ok = PerlRuntime.ensureReady(context)
-    appendLine("runtime ready : $ok")
-    appendLine(PerlRuntime.describe())
-    if (!ok) return@buildString
-    appendLine("perl          : " + PerlRuntime.runOnce("-e", "print \"\$^V on \$^O\""))
-    appendLine("modules       : " + PerlRuntime.runOnce(
-        "-MPOSIX", "-MFcntl", "-MIO::File", "-MEncode", "-e", "print 'POSIX Fcntl IO Encode loaded'",
-    ))
-    val et = Engine.exifTool(context)
-    if (et == null) {
-        appendLine()
-        appendLine("ExifTool      : FAILED TO START")
-        appendLine(Engine.failure())
-        return@buildString
-    }
-    appendLine("ExifTool      : ${et.version()} in ${et.mode} mode")
-    val t0 = System.nanoTime()
-    et.execute("-ver")
-    appendLine("round trip    : %.1f ms".format((System.nanoTime() - t0) / 1_000_000.0))
-    appendLine()
-    appendLine("supported formats:")
-    appendLine(et.execute("-listf").stdout.take(700))
 }

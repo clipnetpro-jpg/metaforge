@@ -60,7 +60,7 @@ fun StripScreen(onBack: () -> Unit) {
         val s = staged ?: return
         val et = Engine.exifTool(context)
         if (et == null) {
-            message = "engine unavailable: ${Engine.failure()}"
+            message = "the engine is not ready yet, try again in a moment"
             return
         }
         busy = true

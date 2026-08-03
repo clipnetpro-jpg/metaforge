@@ -76,7 +76,7 @@ object ForensicAnalyzer {
                     "A single-generation render reacts evenly across the frame; a photograph " +
                     "that has been through a camera pipeline does not.",
                 weight = if (cv < 0.35f) 0.22f else -0.15f,
-                measurement = "ELA variation %.2f (mean %.1f)".format(cv, stats.mean),
+                measurement = "evenness %.2f across the frame".format(1f - cv.coerceIn(0f, 1f)),
             )
         }
 
@@ -98,7 +98,7 @@ object ForensicAnalyzer {
                 noiseStats.mean < 2.2f -> 0.12f
                 else -> -0.2f
             },
-            measurement = "residual %.2f levels, spread %.2f".format(noiseStats.mean, noiseStats.sd),
+            measurement = "grain %.2f of one colour step".format(noiseStats.mean),
         )
 
         // --- detail distribution ----------------------------------------------
@@ -113,7 +113,7 @@ object ForensicAnalyzer {
                 "rendered frame is often equally sharp everywhere. Flat scenes and wide-angle " +
                 "phone shots can also look uniform, so this is a hint, not a finding.",
             weight = if (detailCv < 0.5f) 0.18f else -0.18f,
-            measurement = "detail variation %.2f".format(detailCv),
+            measurement = "sharpness spread %.2f".format(detailCv),
         )
 
         // --- heatmap and hotspots ---------------------------------------------
@@ -281,7 +281,7 @@ object ForensicAnalyzer {
                 bounds = bounds,
                 score = c.score,
                 reason = reason,
-                detail = "block noise %.2f, detail %.2f".format(noise[c.idx], detail[c.idx]),
+                detail = null,
             )
         }
         return taken

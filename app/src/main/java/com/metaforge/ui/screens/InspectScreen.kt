@@ -489,8 +489,8 @@ private fun AddTagSheet(
         Column(Modifier.padding(20.dp).verticalScroll(rememberScrollState())) {
             Text("Add a tag", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
             Text(
-                "Any tag ExifTool can write, in any group. The engine validates the name and " +
-                    "reports back in its own words if it will not accept it.",
+                "Any tag the format can carry, in any group. The name is checked as it is " +
+                    "written, and you are told exactly why if it will not go in.",
                 color = Muted,
                 fontSize = 12.sp,
                 lineHeight = 17.sp,

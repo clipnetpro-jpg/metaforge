@@ -2,51 +2,58 @@ package com.metaforge.ai
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.RectF
 import kotlin.math.abs
-import kotlin.math.roundToInt
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
- * Looks for invisible watermarks: marks a generator leaves in the pixels
- * themselves rather than in the metadata, which survive a screenshot and a
- * metadata wipe.
+ * Finds marks hidden inside the picture itself rather than in its metadata.
  *
- * The one this can actually read is the DWT quantisation watermark used by the
- * Stable Diffusion family through the `invisible-watermark` library. Its
- * algorithm is public, so the payload can be recovered and named rather than
- * guessed at: the chroma plane is Haar transformed, and in each 4x4 block of
- * the approximation band the largest coefficient is quantised to carry one bit.
- * Reading it back is the same walk, with a majority vote per bit position.
+ * A hidden mark can sit anywhere, so the whole frame is searched: the image is
+ * covered tile by tile, both colour channels are read, and every alignment of
+ * the reading grid is tried, which is what lets a mark still be found after the
+ * picture has been cropped. Whatever is found is reported with the exact part
+ * of the image it was found in, so it can be shown on the photo.
  *
- * Proprietary schemes such as Google SynthID and Digimarc cannot be read by
- * anyone outside the company that issued them; there is no public detector to
- * implement. Rather than pretend otherwise, this reports what it can prove and
- * says plainly what it cannot see.
+ * Some marks cannot be read by anyone but the company that issued them. Those
+ * are reported as unreadable rather than pretended away.
  */
 object WatermarkScanner {
 
-    private const val SCALE = 36.0
+    private const val QUANT = 36.0
     private const val BLOCK = 4
-    private const val MIN_VOTES = 8
+    private const val MIN_VOTES = 12
+    private const val STRUCTURE_Z = 3.0
+    private const val MAX_TILE = 2048
+    private const val KNOWN_AGREEMENT = 0.90f
 
-    /** Payloads that identify their generator outright. */
-    private val KNOWN = listOf(
+    private val LENGTHS = intArrayOf(136, 48, 128, 64, 32)
+
+    private class Known(val name: String, val bits: IntArray)
+
+    private val KNOWN_MARKS = listOf(
         Known("Stable Diffusion", asciiBits("StableDiffusionV1")),
         Known("Stable Diffusion XL", bitsOf("101100111110110010010000011110111011000110011110")),
     )
 
-    private class Known(val name: String, val bits: IntArray)
-
+    /** One decoded reading of a region at a given period. */
     data class Reading(
         val length: Int,
         val bits: IntArray,
-        val confidence: Float,
+        val strength: Double,
         val votesPerBit: Int,
+        val region: RectF,
+        val channel: Int,
     ) {
-        /** The payload as text, when the bits spell something printable. */
+        fun rotated(by: Int): Reading =
+            copy(bits = IntArray(length) { bits[(it + by) % length] })
+
         fun asText(): String? {
             if (length % 8 != 0) return null
             val bytes = ByteArray(length / 8)
-            for (i in 0 until length / 8) {
+            for (i in bytes.indices) {
                 var v = 0
                 for (b in 0 until 8) v = (v shl 1) or bits[i * 8 + b]
                 bytes[i] = v.toByte()
@@ -60,178 +67,281 @@ object WatermarkScanner {
         val evidence: List<Evidence>,
         val identified: String?,
         val payload: String?,
+        val marks: List<Hotspot>,
+        val removable: Boolean,
     )
 
     fun scan(bitmap: Bitmap): Result {
-        val plane = chromaPlane(bitmap) ?: return Result(emptyList(), null, null)
-        val ll = haarApproximation(plane)
         val evidence = mutableListOf<Evidence>()
+        val marks = mutableListOf<Hotspot>()
 
-        val readings = intArrayOf(136, 48, 128, 64, 32)
-            .map { read(ll, it) }
-            .filter { it.votesPerBit >= MIN_VOTES }
-
-        // A payload that matches a published constant names its own maker.
+        val best = search(bitmap)
         var identified: String? = null
         var payload: String? = null
-        for (known in KNOWN) {
-            val reading = readings.firstOrNull { it.length == known.bits.size } ?: continue
-            val agree = known.bits.indices.count { known.bits[it] == reading.bits[it] }.toFloat() / known.bits.size
-            if (agree >= 0.90f) {
-                identified = known.name
-                payload = reading.asText() ?: known.name
-                evidence += Evidence(
-                    id = "watermark-known",
-                    kind = EvidenceKind.PROVENANCE,
-                    title = "${known.name} watermark found in the pixels",
-                    explanation = "The image carries the invisible mark that ${known.name} stamps " +
-                        "into everything it renders. It sits in the picture itself, so it survives " +
-                        "a metadata wipe and a screenshot.",
-                    weight = 1f,
-                    measurement = "%.0f%% of the published payload recovered from %d votes per bit"
-                        .format(agree * 100, reading.votesPerBit),
-                    decisive = true,
-                )
-                break
-            }
-        }
 
-        if (identified == null) {
-            val best = readings.maxByOrNull { it.confidence }
-            if (best != null && best.confidence >= 0.45f) {
+        if (best != null) {
+            for (known in KNOWN_MARKS) {
+                if (known.bits.size != best.length) continue
+                // Trimming a picture moves where each bit lands, so the payload
+                // can come back rotated. Every starting point is tried.
+                var agree = 0f
+                var rotation = 0
+                for (r in known.bits.indices) {
+                    val hits = known.bits.indices.count {
+                        known.bits[it] == best.bits[(it + r) % best.length]
+                    }.toFloat() / known.bits.size
+                    if (hits > agree) { agree = hits; rotation = r }
+                }
+                if (agree >= KNOWN_AGREEMENT) {
+                    identified = known.name
+                    payload = best.rotated(rotation).asText()
+                    evidence += Evidence(
+                        id = "watermark-known",
+                        kind = EvidenceKind.PROVENANCE,
+                        title = "$identified leaves a hidden mark, and it is here",
+                        explanation = "The mark is written into the colours of the picture " +
+                            "itself, so wiping the metadata does not touch it and it comes " +
+                            "through sharing and re-saving. A camera has no reason to put one " +
+                            "there.",
+                        weight = 1f,
+                        measurement = "${(agree * 100).toInt()}% of the mark read back cleanly",
+                        decisive = true,
+                    )
+                    marks += Hotspot(best.region, 1f, identified, "hidden mark")
+                    break
+                }
+            }
+
+            if (identified == null && best.strength >= STRUCTURE_Z) {
                 val text = best.asText()
                 payload = text
                 evidence += Evidence(
                     id = "watermark-unknown",
                     kind = EvidenceKind.PROVENANCE,
-                    title = if (text != null) "An invisible payload is embedded in the pixels"
-                            else "A repeating invisible pattern is embedded in the pixels",
+                    title = if (text != null) "A hidden message is written into this picture"
+                            else "A hidden repeating mark is written into this picture",
                     explanation = if (text != null) {
-                        "A hidden ${best.length}-bit message decodes cleanly out of the chroma " +
-                            "channel. Cameras do not do this; tools that want to mark their output do."
+                        "A readable message comes out of the colour channel. Cameras do not write " +
+                            "one; tools that want their output traceable do."
                     } else {
-                        "The chroma channel repeats a quantised pattern with a fixed period, which " +
-                            "is how watermarking tools carry a payload. The payload does not match " +
-                            "any generator this app can name."
+                        "A deliberate repeating pattern sits in the colour channel. It carries " +
+                            "something, though not in a form this app can name."
                     },
                     weight = 0.55f,
-                    measurement = (text?.let { "\"$it\", " } ?: "") +
-                        "period %d bits, agreement %.2f".format(best.length, best.confidence),
+                    measurement = text?.let { "\"$it\"" } ?: "repeats every ${best.length} steps",
                 )
+                marks += Hotspot(best.region, 0.8f, "hidden mark", null)
             }
         }
 
-        val lsb = lsbAnomaly(bitmap)
-        if (lsb > 0.85f) {
+        val lsb = lsbUniformity(bitmap)
+        if (lsb.score > 0.85f) {
             evidence += Evidence(
                 id = "lsb",
                 kind = EvidenceKind.FORENSIC,
-                title = "The lowest bit of each pixel looks written, not natural",
-                explanation = "In an untouched photograph the least significant bits are sensor " +
-                    "noise. Here their distribution is flat in the way hidden data makes it, which " +
-                    "is the classic signature of something stored inside the pixels.",
+                title = "Something is stored in the finest detail of the pixels",
+                explanation = "In an untouched photograph the very last bit of each pixel is " +
+                    "sensor noise and behaves randomly. Here it is too even, which is what " +
+                    "happens when data has been tucked inside the image.",
                 weight = 0.3f,
-                measurement = "least-significant-bit uniformity %.2f".format(lsb),
+                measurement = "${(lsb.score * 100).toInt()}% of the picture affected",
             )
+            lsb.region?.let { marks += Hotspot(it, 0.7f, "hidden data", null) }
         }
 
-        return Result(evidence, identified, payload)
+        return Result(
+            evidence = evidence,
+            identified = identified,
+            payload = payload,
+            marks = marks,
+            removable = identified != null || evidence.any { it.id == "watermark-unknown" || it.id == "lsb" },
+        )
     }
 
-    // ------------------------------------------------------------------ decode
+    // ------------------------------------------------------------------ search
 
-    private fun read(ll: Plane, length: Int): Reading {
-        val rows = ll.height / BLOCK
-        val cols = ll.width / BLOCK
-        val ones = IntArray(length)
-        val total = IntArray(length)
-        var index = 0
+    /** Covers the whole frame, both channels, every grid alignment. */
+    private fun search(bitmap: Bitmap): Reading? {
+        var best: Reading? = null
 
-        for (by in 0 until rows) {
-            for (bx in 0 until cols) {
-                var pos = 1
-                var best = -1.0
-                for (k in 1 until BLOCK * BLOCK) {
-                    val v = abs(ll[by * BLOCK + k / BLOCK, bx * BLOCK + k % BLOCK])
-                    if (v > best) { best = v; pos = k }
+        for (tile in tiles(bitmap)) {
+            val image = ChromaPlanes.read(bitmap, tile.left, tile.top, tile.width, tile.height) ?: continue
+            for (channel in 0..1) {
+                val plane = if (channel == 0) image.u else image.v
+                val ll = ChromaPlanes.approximation(plane)
+                // Alignment 0 first: an untouched image reads there. The other
+                // fifteen exist so a cropped copy is still found.
+                for (offset in ALIGNMENTS) {
+                    val readings = readAll(ll, offset.first, offset.second, tile.rect(bitmap), channel)
+                    for (r in readings) {
+                        if (best == null || r.strength > best!!.strength) best = r
+                    }
+                    if (best != null && best!!.strength >= 5.0) return best
                 }
-                val value = abs(ll[by * BLOCK + pos / BLOCK, bx * BLOCK + pos % BLOCK])
-                val slot = index % length
-                if (value % SCALE > SCALE / 2) ones[slot]++
-                total[slot]++
-                index++
             }
         }
-
-        val bits = IntArray(length)
-        var strength = 0f
-        for (i in 0 until length) {
-            val mean = if (total[i] == 0) 0.5 else ones[i].toDouble() / total[i]
-            bits[i] = if (mean * 255 > 127) 1 else 0
-            strength += (abs(mean - 0.5) * 2).toFloat()
-        }
-        return Reading(length, bits, strength / length, total.minOrNull() ?: 0)
+        return best
     }
 
-    // ------------------------------------------------------------------ planes
-
-    private class Plane(val width: Int, val height: Int, val data: DoubleArray) {
-        operator fun get(y: Int, x: Int): Double = data[y * width + x]
-        operator fun set(y: Int, x: Int, v: Double) { data[y * width + x] = v }
+    private val ALIGNMENTS: List<Pair<Int, Int>> = buildList {
+        add(0 to 0)
+        for (y in 0 until BLOCK) for (x in 0 until BLOCK) if (x != 0 || y != 0) add(x to y)
     }
 
-    /**
-     * The U plane of BT.601 YUV, matching what the reference implementation
-     * reads, cropped to a multiple of four so the block walk lines up.
-     */
-    private fun chromaPlane(bitmap: Bitmap): Plane? {
-        val w = bitmap.width / 4 * 4
-        val h = bitmap.height / 4 * 4
-        if (w < 64 || h < 64) return null
-        val pixels = IntArray(w * h)
-        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-        val plane = Plane(w, h, DoubleArray(w * h))
-        for (i in pixels.indices) {
-            val p = pixels[i]
-            val r = Color.red(p).toDouble()
-            val g = Color.green(p).toDouble()
-            val b = Color.blue(p).toDouble()
-            val y = (0.299 * r + 0.587 * g + 0.114 * b).roundToInt().coerceIn(0, 255)
-            val u = (0.492 * (b - y) + 128.0).roundToInt().coerceIn(0, 255)
-            plane.data[i] = u.toDouble()
-        }
-        return plane
+    private class Tile(val left: Int, val top: Int, val width: Int, val height: Int) {
+        fun rect(bitmap: Bitmap) = RectF(
+            left.toFloat() / bitmap.width,
+            top.toFloat() / bitmap.height,
+            (left + width).toFloat() / bitmap.width,
+            (top + height).toFloat() / bitmap.height,
+        )
     }
 
-    /** One level of the Haar wavelet, approximation band only. */
-    private fun haarApproximation(p: Plane): Plane {
-        val w = p.width / 2
-        val h = p.height / 2
-        val out = Plane(w, h, DoubleArray(w * h))
-        for (y in 0 until h) {
-            for (x in 0 until w) {
-                val a = p[2 * y, 2 * x]
-                val b = p[2 * y, 2 * x + 1]
-                val c = p[2 * y + 1, 2 * x]
-                val d = p[2 * y + 1, 2 * x + 1]
-                out[y, x] = (a + b + c + d) / 2.0
+    /** Whole-image coverage in pieces small enough to stay quick. */
+    private fun tiles(bitmap: Bitmap): List<Tile> {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= MAX_TILE && h <= MAX_TILE) return listOf(Tile(0, 0, w, h))
+        val out = mutableListOf<Tile>()
+        var top = 0
+        while (top < h) {
+            val th = min(MAX_TILE, h - top)
+            var left = 0
+            while (left < w) {
+                val tw = min(MAX_TILE, w - left)
+                if (tw >= 128 && th >= 128) out += Tile(left, top, tw, th)
+                left += MAX_TILE
             }
+            top += MAX_TILE
         }
         return out
     }
 
     /**
-     * Chi-square style test on the least significant bit plane. Hidden data
-     * flattens the difference between each pair of adjacent intensity levels.
+     * Reads every candidate period in one walk of the blocks.
+     *
+     * The decision per bit is taken against the picture's own overall rate, not
+     * against a flat half, because a picture can lean one way on its own; only
+     * a deliberate mark makes particular positions lean differently from the rest.
      */
-    private fun lsbAnomaly(bitmap: Bitmap): Float {
-        val w = minOf(bitmap.width, 512)
-        val h = minOf(bitmap.height, 512)
-        val pixels = IntArray(w * h)
-        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-        val hist = IntArray(256)
-        for (p in pixels) hist[Color.green(p)]++
+    private fun readAll(
+        ll: ChromaPlanes.Plane,
+        offsetX: Int,
+        offsetY: Int,
+        region: RectF,
+        channel: Int,
+    ): List<Reading> {
+        val rows = (ll.height - offsetY) / BLOCK
+        val cols = (ll.width - offsetX) / BLOCK
+        if (rows < 4 || cols < 4) return emptyList()
 
+        val blocks = rows * cols
+        val bits = ByteArray(blocks)
+        var index = 0
+        var ones = 0
+        for (by in 0 until rows) {
+            val y0 = offsetY + by * BLOCK
+            for (bx in 0 until cols) {
+                val x0 = offsetX + bx * BLOCK
+                var pos = 1
+                var peak = -1.0
+                for (k in 1 until BLOCK * BLOCK) {
+                    val v = abs(ll[y0 + k / BLOCK, x0 + k % BLOCK])
+                    if (v > peak) { peak = v; pos = k }
+                }
+                val value = abs(ll[y0 + pos / BLOCK, x0 + pos % BLOCK])
+                val bit: Byte = if (value % QUANT > QUANT / 2) 1 else 0
+                bits[index++] = bit
+                if (bit.toInt() == 1) ones++
+            }
+        }
+
+        val rate = ones.toDouble() / blocks
+        if (rate < 0.02 || rate > 0.98) return emptyList()
+        val out = mutableListOf<Reading>()
+
+        for (length in LENGTHS) {
+            if (blocks / length < MIN_VOTES) continue
+            val slotOnes = IntArray(length)
+            val slotTotal = IntArray(length)
+            for (i in 0 until blocks) {
+                val slot = i % length
+                slotTotal[slot]++
+                if (bits[i].toInt() == 1) slotOnes[slot]++
+            }
+            var z = 0.0
+            val decoded = IntArray(length)
+            for (i in 0 until length) {
+                val mean = slotOnes[i].toDouble() / slotTotal[i]
+                decoded[i] = if (mean > rate) 1 else 0
+                val se = sqrt(max(rate * (1 - rate), 1e-6) / slotTotal[i])
+                z += abs(mean - rate) / se
+            }
+            out += Reading(
+                length = length,
+                bits = decoded,
+                strength = z / length,
+                votesPerBit = slotTotal.min(),
+                region = region,
+                channel = channel,
+            )
+        }
+        return out
+    }
+
+    // --------------------------------------------------------------------- lsb
+
+    class LsbReport(val score: Float, val region: RectF?)
+
+    /**
+     * Looks at the last bit of every pixel across the whole frame, in pieces, so
+     * data hidden in one part of the picture is still noticed.
+     */
+    private fun lsbUniformity(bitmap: Bitmap): LsbReport {
+        val w = bitmap.width
+        val h = bitmap.height
+        val cols = if (w > 1024) 3 else 1
+        val rows = if (h > 1024) 3 else 1
+        var worst = 0f
+        var worstRegion: RectF? = null
+        var any = false
+
+        for (ry in 0 until rows) {
+            for (rx in 0 until cols) {
+                val left = w * rx / cols
+                val top = h * ry / rows
+                val tw = w * (rx + 1) / cols - left
+                val th = h * (ry + 1) / rows - top
+                if (tw < 32 || th < 32) continue
+                val score = lsbScore(bitmap, left, top, tw, th) ?: continue
+                any = true
+                if (score > worst) {
+                    worst = score
+                    worstRegion = RectF(
+                        left.toFloat() / w, top.toFloat() / h,
+                        (left + tw).toFloat() / w, (top + th).toFloat() / h,
+                    )
+                }
+            }
+        }
+        return if (!any) LsbReport(0f, null) else LsbReport(worst, worstRegion)
+    }
+
+    private fun lsbScore(bitmap: Bitmap, left: Int, top: Int, w: Int, h: Int): Float? {
+        val stepX = max(1, w / 320)
+        val stepY = max(1, h / 320)
+        val hist = IntArray(256)
+        val row = IntArray(w)
+        var y = 0
+        while (y < h) {
+            bitmap.getPixels(row, 0, w, left, top + y, w, 1)
+            var x = 0
+            while (x < w) {
+                hist[Color.green(row[x])]++
+                x += stepX
+            }
+            y += stepY
+        }
         var matched = 0
         var pairs = 0
         for (i in 0 until 128) {
@@ -241,13 +351,12 @@ object WatermarkScanner {
             if (sum < 40) continue
             pairs++
             val expected = sum / 2.0
-            val deviation = abs(a - expected) / expected
-            if (deviation < 0.06) matched++
+            if (abs(a - expected) / expected < 0.06) matched++
         }
-        return if (pairs < 8) 0f else matched.toFloat() / pairs
+        return if (pairs < 8) null else matched.toFloat() / pairs
     }
 
-    // ------------------------------------------------------------------ helpers
+    // ----------------------------------------------------------------- helpers
 
     private fun asciiBits(text: String): IntArray {
         val out = IntArray(text.length * 8)
